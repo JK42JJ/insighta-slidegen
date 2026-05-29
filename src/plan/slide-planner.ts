@@ -12,12 +12,12 @@
  * The planner is a pure function (no DB access); all I/O happens in the
  * orchestrator (src/index.ts). This keeps the planner unit-testable.
  */
-import crypto from "crypto";
-import { LAYOUT_MAP } from "@/plan/templates";
-import { buildNarrativePlan } from "@/plan/narrative";
-import type { V2Summary, FigureRef, SlideOutline, Slide } from "@/types/slide-manifest";
+import crypto from 'crypto';
+import { LAYOUT_MAP } from '@/plan/templates';
+import { buildNarrativePlan } from '@/plan/narrative';
+import type { V2Summary, FigureRef, SlideOutline, Slide } from '@/types/slide-manifest';
 
-const GENERATOR_VERSION = "slidegen-v1";
+const GENERATOR_VERSION = 'slidegen-v1';
 
 /**
  * Converts a V2Summary + CV figures into a fully typed SlideOutline.
@@ -31,12 +31,8 @@ const GENERATOR_VERSION = "slidegen-v1";
  * Use LAYOUT_MAP[step.type or derived layout] to pick body_json structure.
  * Attach figures to figure_slot steps by matching timestamp_sec into section range.
  */
-export function planSlides(
-  summary: V2Summary,
-  _figures: FigureRef[],
-  lang?: string
-): SlideOutline {
-  const resolvedLang = lang ?? summary.source_language ?? "ko";
+export function planSlides(summary: V2Summary, _figures: FigureRef[], lang?: string): SlideOutline {
+  const resolvedLang = lang ?? summary.source_language ?? 'ko';
   const fingerprint = computeFingerprint(
     summary.video_id,
     summary.template_version,
@@ -69,7 +65,7 @@ function computeFingerprint(
   generatorVersion: string
 ): string {
   return crypto
-    .createHash("sha256")
+    .createHash('sha256')
     .update(`${videoId}:${templateVersion}:${generatorVersion}`)
-    .digest("hex");
+    .digest('hex');
 }

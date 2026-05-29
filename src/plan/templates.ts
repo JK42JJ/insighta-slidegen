@@ -5,7 +5,7 @@
  * A LayoutFieldMap describes which v2 fields populate which template zones.
  * The planner (slide-planner.ts) reads these maps to build body_json for each slide.
  */
-import { type Layout } from "@/types/slide-manifest";
+import { type Layout } from '@/types/slide-manifest';
 
 /** Zones available in a slide template. Not every layout uses all zones. */
 export interface TemplateZone {
@@ -18,7 +18,7 @@ export interface TemplateZone {
   /** Speaker notes zone */
   notes?: string;
   /** Aspect ratio for figure slots: "16:9" | "4:3" | "1:1" */
-  figureAspect?: "16:9" | "4:3" | "1:1";
+  figureAspect?: '16:9' | '4:3' | '1:1';
 }
 
 /** Maps each layout to which v2 source fields fill its zones. */
@@ -39,54 +39,54 @@ export interface LayoutFieldMap {
  */
 export const LAYOUT_MAP: Record<Layout, LayoutFieldMap> = {
   cover: {
-    layout: "cover",
-    primarySource: "core.title",
-    zones: { title: "core.title", body: "core.one_liner" },
+    layout: 'cover',
+    primarySource: 'core.title',
+    zones: { title: 'core.title', body: 'core.one_liner' },
   },
   section_intro: {
-    layout: "section_intro",
-    primarySource: "segments[n].title",
-    zones: { title: "segments[n].title", body: "segments[n].summary" },
+    layout: 'section_intro',
+    primarySource: 'segments[n].title',
+    zones: { title: 'segments[n].title', body: 'segments[n].summary' },
   },
   key_points: {
-    layout: "key_points",
-    primarySource: "segments[n].key_points",
-    zones: { title: "segments[n].title", body: "segments[n].key_points" },
+    layout: 'key_points',
+    primarySource: 'segments[n].key_points',
+    zones: { title: 'segments[n].title', body: 'segments[n].key_points' },
     maxItems: 5,
   },
   qa_pair: {
-    layout: "qa_pair",
-    primarySource: "core.qa_pairs[n]",
-    zones: { title: "core.qa_pairs[n].q", body: "core.qa_pairs[n].a" },
+    layout: 'qa_pair',
+    primarySource: 'core.qa_pairs[n]',
+    zones: { title: 'core.qa_pairs[n].q', body: 'core.qa_pairs[n].a' },
   },
   figure_full: {
-    layout: "figure_full",
-    primarySource: "cv_figure",
-    zones: { title: "figure.caption", figureAspect: "16:9" },
+    layout: 'figure_full',
+    primarySource: 'cv_figure',
+    zones: { title: 'figure.caption', figureAspect: '16:9' },
   },
   figure_caption: {
-    layout: "figure_caption",
-    primarySource: "cv_figure",
+    layout: 'figure_caption',
+    primarySource: 'cv_figure',
     zones: {
-      title: "figure.caption",
-      body: "figure.caption",
-      figureAspect: "4:3",
+      title: 'figure.caption',
+      body: 'figure.caption',
+      figureAspect: '4:3',
     },
   },
   timeline: {
-    layout: "timeline",
-    primarySource: "segments",
-    zones: { title: "core.title", body: "segments[*].title" },
+    layout: 'timeline',
+    primarySource: 'segments',
+    zones: { title: 'core.title', body: 'segments[*].title' },
   },
   summary: {
-    layout: "summary",
-    primarySource: "core.key_concepts",
-    zones: { title: "core.one_liner", body: "core.key_concepts" },
+    layout: 'summary',
+    primarySource: 'core.key_concepts',
+    zones: { title: 'core.one_liner', body: 'core.key_concepts' },
     maxItems: 6,
   },
   blank: {
-    layout: "blank",
-    primarySource: "",
+    layout: 'blank',
+    primarySource: '',
     zones: {},
   },
 };

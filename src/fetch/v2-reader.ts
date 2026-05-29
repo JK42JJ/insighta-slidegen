@@ -14,8 +14,8 @@
  * Any schema mismatch throws a ZodError, surfacing data-quality regressions
  * rather than propagating malformed data into the planner.
  */
-import { PrismaClient } from "@prisma/client";
-import { V2SummarySchema, type V2Summary } from "@/types/slide-manifest";
+import { PrismaClient } from '@prisma/client';
+import { V2SummarySchema, type V2Summary } from '@/types/slide-manifest';
 
 /**
  * Fetches the v2 rich-summary for a video and validates it.
@@ -35,15 +35,12 @@ import { V2SummarySchema, type V2Summary } from "@/types/slide-manifest";
  * TODO: implement — use prisma.video_rich_summaries.findUnique({ where: { video_id } })
  *   then run the three gate assertions before calling V2SummarySchema.parse().
  */
-export async function fetchV2(
-  _youtubeVideoId: string,
-  _prisma?: PrismaClient
-): Promise<V2Summary> {
+export async function fetchV2(_youtubeVideoId: string, _prisma?: PrismaClient): Promise<V2Summary> {
   // TODO: SELECT * FROM video_rich_summaries WHERE video_id = _youtubeVideoId
   // Assert template_version='v2', quality_flag='pass', transcript_used=true.
   // Return V2SummarySchema.parse(row) — throws ZodError on shape mismatch.
   void V2SummarySchema; // referenced to keep import live until TODO is implemented
   throw new Error(
-    "TODO: fetchV2 — query video_rich_summaries, assert v2/pass/transcript_used gate, zod-validate"
+    'TODO: fetchV2 — query video_rich_summaries, assert v2/pass/transcript_used gate, zod-validate'
   );
 }
