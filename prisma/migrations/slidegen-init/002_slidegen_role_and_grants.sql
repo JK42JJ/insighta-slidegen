@@ -34,6 +34,11 @@ BEGIN
 END
 $$;
 
+-- The admin running this script must be a MEMBER of slidegen_rw to reassign
+-- object ownership to it below (a Postgres requirement). On Supabase the admin
+-- is the `postgres` role. Idempotent.
+GRANT slidegen_rw TO current_user;
+
 -- ---------------------------------------------------------------
 -- 2) Own the slidegen schema → full control of slide_* + future tables
 -- ---------------------------------------------------------------
