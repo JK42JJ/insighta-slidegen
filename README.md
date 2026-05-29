@@ -49,6 +49,11 @@ Pipeline is card-level v1: one card → one deck.
 
 ## Quick Start
 
+> **New contributor?** Follow the step-by-step guide in
+> [`docs/ONBOARDING.md`](./docs/ONBOARDING.md) — it covers clone → setup → working
+> with Claude Code. You can even tell Claude Code: *"Read `docs/ONBOARDING.md` and set
+> up the project."*
+
 ```bash
 git clone https://github.com/JK42JJ/insighta-slidegen.git
 cd insighta-slidegen
