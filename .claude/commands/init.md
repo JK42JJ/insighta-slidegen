@@ -95,6 +95,12 @@ From the output:
 ### Phase 4: Status Dashboard (parallel execution)
 
 ```bash
+# Freshness check — fetch is read-only (never mutates the working tree).
+git fetch origin --quiet 2>/dev/null || true
+BRANCH=$(git branch --show-current)
+BEHIND=$(git rev-list --count "HEAD..origin/${BRANCH}" 2>/dev/null || echo 0)
+AHEAD=$(git rev-list --count "origin/${BRANCH}..HEAD" 2>/dev/null || echo 0)
+
 git log --oneline -5
 git diff --stat
 gh issue list --state open --json number,title,labels --jq '.[] | "#\(.number): \(.title)"'
@@ -225,6 +231,7 @@ Note: CronCreate is session-scoped (auto-expires ~3 days); re-registered every /
 ### Git Status
 - Last 3 commits: {oneline}
 - Uncommitted: {count} files
+- Sync: behind origin/{branch} by {BEHIND}, ahead by {AHEAD} — ⚠️ if behind > 0: pull before working (`/work` auto-syncs when clean, or `git pull --ff-only`)
 - Open PRs: {list or "none"}
 
 ### Open Issues ({count})

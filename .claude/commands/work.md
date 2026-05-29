@@ -18,6 +18,23 @@ Usage: `/work [target?]`
 
 ## Execution Order
 
+### Phase 0: Sync to latest main (WIP-safe)
+
+Stay current with collaborators. **Always fetch; only pull/switch when the working tree is CLEAN** (protects WIP + stashes). A new work branch MUST be cut from up-to-date main.
+
+```bash
+git fetch origin --quiet
+if [ -z "$(git status --porcelain)" ]; then
+  if git switch main 2>/dev/null && git pull --ff-only origin main 2>/dev/null; then
+    echo "✓ main synced to origin/main — branch new work from here"
+  else
+    echo "⚠️ could not ff-only pull main (diverged?) — resolve manually before branching"
+  fi
+else
+  echo "⚠️ working tree not clean — auto-sync skipped. Commit/stash, then pull main before creating a work branch."
+fi
+```
+
 ### Phase 1: Gather Work Candidates (parallel)
 
 ```bash

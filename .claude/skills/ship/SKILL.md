@@ -71,6 +71,16 @@ fi
   || { echo "🚫 /verify did not PASS for current HEAD"; exit 1; }
 ```
 
+**0d. Up-to-date with origin/main** (stay current in collaboration — no auto-rebase):
+```bash
+git fetch origin --quiet
+BEHIND=$(git rev-list --count "HEAD..origin/main" 2>/dev/null || echo 0)
+if [ "${BEHIND:-0}" -gt 0 ]; then
+  echo "🚫 SHIP BLOCKED — branch is ${BEHIND} commits behind origin/main. Rebase/merge main locally, then re-run /ship."
+  exit 1
+fi
+```
+
 If `--dry-run`, output Phase 0 + Phase 1 results and exit.
 
 ### Phase 1: Pre-flight Verification
