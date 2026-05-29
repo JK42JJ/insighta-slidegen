@@ -8,18 +8,32 @@
 --   Local:  docker exec supabase-db-dev psql -U supabase_admin -d postgres -f 001_create_slide_tables.sql
 --   Prod:   psql "$DIRECT_URL" -f prisma/migrations/slidegen-init/001_create_slide_tables.sql
 --
+-- All slide_* tables live in a DEDICATED `slidegen` schema (not public), so a
+-- least-privilege collaborator role can own them while having only SELECT on
+-- insighta's public tables. See 002_slidegen_role_and_grants.sql and
+-- docs/COLLABORATOR_ACCESS.md.
+--
 -- After apply:
---   1. Local verify:  docker exec supabase-db-dev psql ... -c "\d slide_decks"
---   2. Prod  verify:  psql "$DIRECT_URL" -c "\d slide_decks"
---   3. Reload PostgREST schema cache:
+--   1. Local verify:  docker exec supabase-db-dev psql ... -c "\d slidegen.slide_decks"
+--   2. Prod  verify:  psql "$DIRECT_URL" -c "\d slidegen.slide_decks"
+--   3. Then apply 002_slidegen_role_and_grants.sql (role + grants).
+--   4. Reload PostgREST schema cache (only if slidegen schema is API-exposed; slidegen
+--      itself uses Prisma/direct SQL so this is optional):
 --        local: psql "$DATABASE_URL" -c "NOTIFY pgrst, 'reload schema'"
 --               docker restart supabase-rest-dev
 --        prod:  Supabase Dashboard → Settings → API → "Reload schema"
---   4. Local-first, then prod. No shortcuts.
+--   5. Local-first, then prod. No shortcuts.
 
 BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Dedicated schema for slidegen-owned tables (least-privilege isolation).
+CREATE SCHEMA IF NOT EXISTS slidegen;
+
+-- Place every CREATE TABLE below into `slidegen`; resolve the pgvector type from
+-- public or Supabase's `extensions` schema.
+SET search_path TO slidegen, public, extensions;
 
 -- ---------------------------------------------------------------
 -- slide_decks

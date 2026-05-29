@@ -7,12 +7,15 @@ datasource db {
   provider  = "postgresql"
   url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
-  schemas   = ["public"]
+  schemas   = ["public", "slidegen"]
 }
 
 // ============================================================
-// OWNED MODELS — slide_* tables live in this repo.
+// OWNED MODELS — slide_* tables live in the dedicated `slidegen` schema
+// (least-privilege isolation: the collaborator role owns this schema and only
+// has SELECT on insighta's public tables — see docs/COLLABORATOR_ACCESS.md).
 // Apply DDL via prisma/migrations/slidegen-init/001_create_slide_tables.sql
+// then grant scoped access via 002_slidegen_role_and_grants.sql
 // NOT via `prisma db push` (Supabase auth-schema ownership silent fail).
 // ============================================================
 
@@ -47,7 +50,7 @@ model slide_decks {
   @@index([video_id], map: "idx_slide_decks_video_id")
   @@index([status], map: "idx_slide_decks_status")
   @@index([mandala_id], map: "idx_slide_decks_mandala_id")
-  @@schema("public")
+  @@schema("slidegen")
 }
 
 /// Individual slides within a deck.
@@ -66,7 +69,7 @@ model slide_slides {
   figures slide_figures[]
 
   @@index([deck_id, position], map: "idx_slide_slides_deck_position")
-  @@schema("public")
+  @@schema("slidegen")
 }
 
 /// CV-extracted or redrawn figures attached to a deck or slide.
@@ -94,7 +97,7 @@ model slide_figures {
 
   @@index([deck_id], map: "idx_slide_figures_deck_id")
   @@index([verification_status], map: "idx_slide_figures_verification_status")
-  @@schema("public")
+  @@schema("slidegen")
 }
 
 /// CLIP-embedded keyframes extracted by the Mac Mini CV service.
@@ -117,7 +120,7 @@ model slide_keyframes {
 
   @@index([youtube_video_id, section_index], map: "idx_slide_keyframes_video_section")
   @@index([is_selected], map: "idx_slide_keyframes_is_selected")
-  @@schema("public")
+  @@schema("slidegen")
 }
 
 /// BGE-M3 caption segment embeddings for topic-change detection.
@@ -137,7 +140,7 @@ model slide_caption_segments {
   created_at       DateTime @default(now()) @db.Timestamptz(6)
 
   @@index([youtube_video_id], map: "idx_slide_caption_segments_video_id")
-  @@schema("public")
+  @@schema("slidegen")
 }
 
 /// Async job tracker for the slidegen pipeline.
@@ -157,7 +160,7 @@ model slide_jobs {
   deck slide_decks? @relation(fields: [deck_id], references: [id])
 
   @@index([status], map: "idx_slide_jobs_status")
-  @@schema("public")
+  @@schema("slidegen")
 }
 
 // ============================================================

@@ -100,19 +100,29 @@ Open `.env` and fill in the values (ask the project owner). Notes:
 
 ## Step 5 — Database tables (`slide_*`)
 
-This project owns the `slide_*` tables and **reads Insighta's tables read-only**.
-Apply the schema with **raw SQL** — `prisma db push` is **banned** (it silently fails on
-Supabase). Local-first, then prod.
+This project owns the `slide_*` tables — which live in a dedicated **`slidegen`
+schema** — and **reads Insighta's `public` tables read-only**. Apply the schema with
+**raw SQL** — `prisma db push` is **banned** (it silently fails on Supabase).
+Local-first, then prod.
+
+> **Access control:** if you are the project owner setting up a collaborator, read
+> [`docs/COLLABORATOR_ACCESS.md`](./COLLABORATOR_ACCESS.md) first — it explains the
+> least-privilege `slidegen_rw` role (so a collaborator gets read-only on Insighta
+> data + full access to `slidegen.*` only, **never** the service-role key).
 
 ```bash
-# Apply the slide_* tables to your dev database
+# 1) schema + slide_* tables
 psql "$DIRECT_URL" -f prisma/migrations/slidegen-init/001_create_slide_tables.sql
 
-# Verify (should list slide_decks, slide_slides, slide_figures, slide_keyframes,
-# slide_jobs, slide_caption_segments)
-psql "$DIRECT_URL" -c "\dt slide_*"
+# 2) (owner only) scoped collaborator role — set a password in 002 first
+psql "$DIRECT_URL" -f prisma/migrations/slidegen-init/002_slidegen_role_and_grants.sql
+
+# Verify (lists the six slide_* tables in the slidegen schema)
+psql "$DIRECT_URL" -c "\dt slidegen.*"
 ```
 
+> If you connect with the scoped `slidegen_rw` role, your `DATABASE_URL` already points
+> at the right account; you only need step 1/2 if you are the owner provisioning the DB.
 > If you don't have a writable database yet, skip this step — you can still run the
 > type-checks, tests, and the Claude Code workflow.
 
