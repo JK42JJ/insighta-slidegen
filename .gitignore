@@ -1,0 +1,75 @@
+# Dependencies
+node_modules/
+yarn.lock
+pnpm-lock.yaml
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Environment variables — NEVER commit values
+.env
+.env.*
+!.env.example
+
+# OAuth tokens (gitignored; refresh token lives here at runtime)
+token*.json
+credentials*.json
+
+# SSH / cert keys
+*.pem
+
+# Generated PDFs and slide output
+*.pdf
+assets/out/
+
+# macOS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Testing / coverage
+coverage/
+.nyc_output/
+*.lcov
+
+# Cache
+.cache/
+*.cache
+__pycache__/
+.venv/
+py/**/__pycache__/
+mac-mini/**/__pycache__/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temp
+temp/
+tmp/
+*.tmp
+
+# Local secrets / config (never committed)
+*.local.json
+.mcp.json
+
+# Claude Code: commands/skills/agents ARE tracked (project workflow inherited from insighta).
+# Only local settings are ignored (already covered by *.local.json above).
+.claude/settings.local.json
+
+# Prisma dev DB
+prisma/dev.db
+prisma/dev.db-journal
+
+# Python venvs / build artifacts
+*.egg-info/
+dist-info/

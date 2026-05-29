@@ -1,0 +1,207 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+  schemas   = ["public"]
+}
+
+// ============================================================
+// OWNED MODELS — slide_* tables live in this repo.
+// Apply DDL via prisma/migrations/slidegen-init/001_create_slide_tables.sql
+// NOT via `prisma db push` (Supabase auth-schema ownership silent fail).
+// ============================================================
+
+/// A generated slide deck for a single video + generator version.
+/// video_id is NOT the PK; surrogate uuid + (video_id, generator_version) unique
+/// allows re-generation without clobbering the previous deck.
+model slide_decks {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  video_id          String    @db.VarChar(11)
+  mandala_id        String?   @db.Uuid
+  user_id           String?   @db.Uuid
+  lang              String    @default("ko") @db.VarChar(5)
+  status            String    @default("queued") @db.VarChar(20)
+  slides_json       Json?
+  slide_count       Int?
+  google_slides_id  String?
+  google_slides_url String?
+  pdf_url           String?
+  vector_pdf_url    String?
+  /// SHA-256 of video_id + template_version + generator_version: stale-deck detection.
+  v2_fingerprint    String?   @db.VarChar(64)
+  generator_version String    @default("slidegen-v1") @db.VarChar(30)
+  error             String?
+  created_at        DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+
+  slides   slide_slides[]
+  figures  slide_figures[]
+  jobs     slide_jobs[]
+
+  @@unique([video_id, generator_version], map: "uq_slide_decks_video_version")
+  @@index([video_id], map: "idx_slide_decks_video_id")
+  @@index([status], map: "idx_slide_decks_status")
+  @@index([mandala_id], map: "idx_slide_decks_mandala_id")
+  @@schema("public")
+}
+
+/// Individual slides within a deck.
+model slide_slides {
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  deck_id     String  @db.Uuid
+  position    Int
+  layout      String  @db.VarChar(30)
+  title       String?
+  body_json   Json?
+  notes       String?
+  /// 0-based index into v2 segments[] array; NULL for cover/transition slides.
+  section_ref Int?
+
+  deck    slide_decks     @relation(fields: [deck_id], references: [id])
+  figures slide_figures[]
+
+  @@index([deck_id, position], map: "idx_slide_slides_deck_position")
+  @@schema("public")
+}
+
+/// CV-extracted or redrawn figures attached to a deck or slide.
+model slide_figures {
+  id                  String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  deck_id             String  @db.Uuid
+  slide_id            String? @db.Uuid
+  /// CV service internal figure id (yt-vid + frame-offset hash).
+  cv_figure_id        String? @db.VarChar(80)
+  /// "chart" | "diagram" | "equation" | "table" | "screenshot" | "keyframe"
+  kind                String  @db.VarChar(20)
+  png_url             String
+  vector_pdf_url      String?
+  vector_svg_url      String?
+  caption             String?
+  timestamp_sec       Int?
+  /// JSON array of atom indices from v2 analysis.atoms[] this figure derives from.
+  atom_refs           Json?
+  /// "pending" | "verified" | "rejected"
+  verification_status String  @default("pending") @db.VarChar(20)
+  extraction_conf     Float?
+
+  deck  slide_decks   @relation(fields: [deck_id], references: [id])
+  slide slide_slides? @relation(fields: [slide_id], references: [id])
+
+  @@index([deck_id], map: "idx_slide_figures_deck_id")
+  @@index([verification_status], map: "idx_slide_figures_verification_status")
+  @@schema("public")
+}
+
+/// CLIP-embedded keyframes extracted by the Mac Mini CV service.
+/// clip_embedding uses pgvector; DDL applied via raw SQL (Unsupported type).
+model slide_keyframes {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  youtube_video_id String  @db.VarChar(11)
+  section_index   Int
+  timestamp_sec   Float
+  /// "scene_change" | "title_card" | "diagram" | "chart" | "face" | "b_roll"
+  frame_type      String   @db.VarChar(16)
+  type_confidence Float?
+  selection_score Float?
+  clip_model      String   @default("clip-vit-b32") @db.VarChar(32)
+  /// pgvector 512-dim embedding. Declared Unsupported; HNSW index in raw SQL.
+  clip_embedding  Unsupported("vector(512)")?
+  quality_score   Float?
+  is_selected     Boolean  @default(false)
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([youtube_video_id, section_index], map: "idx_slide_keyframes_video_section")
+  @@index([is_selected], map: "idx_slide_keyframes_is_selected")
+  @@schema("public")
+}
+
+/// BGE-M3 caption segment embeddings for topic-change detection.
+/// Populated by captions.py (mac-mini CV service) before keyframe selection.
+/// embedding is 1024-dim (BAAI/bge-m3); HNSW index in raw SQL.
+model slide_caption_segments {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  youtube_video_id String   @db.VarChar(11)
+  from_sec         Float
+  to_sec           Float
+  text             String
+  /// True when cosine distance to previous segment exceeds topic-change threshold.
+  is_topic_change  Boolean  @default(false)
+  /// pgvector 1024-dim BGE-M3 embedding. Declared Unsupported; HNSW index in raw SQL.
+  embedding        Unsupported("vector(1024)")?
+  model_version    String   @default("bge-m3") @db.VarChar(32)
+  created_at       DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([youtube_video_id], map: "idx_slide_caption_segments_video_id")
+  @@schema("public")
+}
+
+/// Async job tracker for the slidegen pipeline.
+model slide_jobs {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  deck_id    String?  @db.Uuid
+  card_id    String?
+  video_id   String?  @db.VarChar(11)
+  /// "resolve" | "fetch_v2" | "cv_extract" | "plan" | "build_slides" | "export_pdf"
+  stage      String   @db.VarChar(20)
+  /// "queued" | "running" | "done" | "error"
+  status     String   @default("queued") @db.VarChar(20)
+  detail     Json?
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  deck slide_decks? @relation(fields: [deck_id], references: [id])
+
+  @@index([status], map: "idx_slide_jobs_status")
+  @@schema("public")
+}
+
+// ============================================================
+// READ MIRROR — owned by insighta. Subset columns only.
+// NEVER run migrations against these models from this repo.
+// These declarations exist solely so Prisma client can query
+// them; all DDL lives in /Users/jeonhokim/cursor/insighta/.
+// ============================================================
+
+/// Read-mirror of insighta.video_rich_summaries.
+/// Only the columns consumed by slidegen are declared here.
+model video_rich_summaries {
+  video_id              String   @id @db.VarChar(11)
+  template_version      String   @default("v1") @db.VarChar(10)
+  source_language       String?  @db.VarChar(5)
+  quality_flag          String?  @db.VarChar(20)
+  transcript_used       Boolean  @default(false)
+  core                  Json?
+  analysis              Json?
+  segments              Json?
+  lora                  Json?
+  mandala_relevance_pct Int?
+
+  @@schema("public")
+}
+
+/// Read-mirror of insighta.youtube_videos (subset).
+model youtube_videos {
+  id               String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  youtube_video_id String  @unique @db.VarChar(11)
+  title            String?
+  channel_title    String?
+  duration_seconds Int?
+
+  @@schema("public")
+}
+
+/// Read-mirror of insighta.video_captions (subset).
+model video_captions {
+  id       String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  video_id String  @db.VarChar(11)
+  language String? @db.VarChar(10)
+  text     String?
+  segments Json?
+
+  @@schema("public")
+}

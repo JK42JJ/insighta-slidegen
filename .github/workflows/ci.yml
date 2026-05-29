@@ -1,0 +1,158 @@
+name: CI
+
+# Trigger: PRs to main + reuse via workflow_call from deploy.yml.
+# Push-to-branch is intentionally omitted — pull_request already covers
+# feature branches, and the double-run (push + pull_request) wastes minutes.
+on:
+  pull_request:
+    branches: [main]
+    # Path filter: skip CI entirely when only docs/assets change.
+    paths:
+      - 'src/**'
+      - 'py/**'
+      - 'mac-mini/**'
+      - 'tests/**'
+      - 'prisma/**'
+      - 'package*.json'
+      - 'tsconfig*.json'
+      - '.eslintrc.json'
+      - 'requirements*.txt'
+      - '.github/workflows/ci.yml'
+  workflow_call:
+
+# Cancel superseded runs for the same PR/branch. deploy.yml keeps
+# cancel-in-progress: false so production runs are never interrupted.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── TypeScript ──────────────────────────────────────────────────────────────
+  typecheck:
+    name: Type Check (TS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: tsc --noEmit (strict)
+        run: npm run typecheck
+
+  # ── ESLint ───────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint (ESLint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run lint
+
+  # ── TS unit tests (vitest) ───────────────────────────────────────────────────
+  test:
+    name: Test (Vitest)
+    runs-on: ubuntu-latest
+    needs: [typecheck]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Run vitest
+        run: npm run test
+
+  # ── Python lint + tests ──────────────────────────────────────────────────────
+  python:
+    name: Python lint + test (ruff + pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          # Cache keys cover both the main compositor and the CV service.
+          cache-dependency-path: |
+            py/requirements*.txt
+            mac-mini/slidegen-service/requirements*.txt
+
+      - name: Install py/ deps
+        # requirements.txt may not exist yet; tolerate missing file gracefully.
+        run: |
+          if [ -f py/requirements.txt ]; then
+            pip install -r py/requirements.txt
+          fi
+          pip install ruff pytest
+
+      - name: Install mac-mini/slidegen-service deps
+        run: |
+          if [ -f mac-mini/slidegen-service/requirements.txt ]; then
+            pip install -r mac-mini/slidegen-service/requirements.txt
+          fi
+
+      - name: Ruff lint — py/
+        run: ruff check py/ --output-format=github || true
+
+      - name: Ruff lint — mac-mini/slidegen-service/
+        run: ruff check mac-mini/slidegen-service/ --output-format=github || true
+
+      - name: pytest — py/
+        run: |
+          if [ -d py/tests ]; then
+            pytest py/tests -v
+          else
+            echo "No py/tests directory yet — skipping"
+          fi
+
+      - name: pytest — mac-mini/slidegen-service/
+        run: |
+          if [ -d mac-mini/slidegen-service/tests ]; then
+            pytest mac-mini/slidegen-service/tests -v
+          else
+            echo "No mac-mini/slidegen-service/tests directory yet — skipping"
+          fi
+
+  # ── TypeScript build ─────────────────────────────────────────────────────────
+  build:
+    name: Build (tsc)
+    runs-on: ubuntu-latest
+    needs: [typecheck, lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: tsc build
+        run: npm run build
