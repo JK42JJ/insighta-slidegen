@@ -41,10 +41,16 @@ See [`docs/PRD.md`](./PRD.md) for the full design (the frame-selection pipeline 
 | **psql** | optional | apply DB DDL | Postgres client |
 | **Docker** | optional | run the CV service container | https://docker.com |
 
-You will also need, **from the project owner** (these are NOT in the repo — it is public):
-- Supabase connection strings + service-role key (read access to Insighta data).
-- Google OAuth client id/secret (Google Cloud project with Slides + Drive API enabled).
-- CV service URL + token (or run the Mac Mini CV service yourself).
+You do **NOT** need your own Supabase or any local database. The owner gives you a
+**scoped database connection string** (the `slidegen_rw` role) that has read-only access
+to Insighta content + read/write on the `slidegen` schema only — see
+[`docs/COLLABORATOR_ACCESS.md`](./COLLABORATOR_ACCESS.md).
+
+You will need, **from the project owner** (these are NOT in the repo — it is public):
+- The **`slidegen_rw` connection strings** (`DATABASE_URL`, `DIRECT_URL`, `SUPABASE_URL`).
+  These point at the shared DB through a least-privilege role — **not** the service-role key.
+- Google OAuth client id/secret (only when building a real deck — Slides + Drive API).
+- CV service URL + token (only if you run the Mac Mini CV pipeline).
 
 ---
 
@@ -86,45 +92,51 @@ cd ..
 cp .env.example .env
 ```
 
-Open `.env` and fill in the values (ask the project owner). Notes:
-- **Required for most work:** `DATABASE_URL`, `DIRECT_URL`, `SUPABASE_URL`,
-  `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET`.
-- **Keep `SLIDEGEN_MODE=dev`** for local development.
-- **Leave `VISION_API_PROVIDER` and `GEMINI_API_KEY` blank** — they are **prod-only**.
-  Setting them in dev triggers real API calls/billing (forbidden by the project rules).
-- `SLIDEGEN_CV_SERVICE_URL` / `SLIDEGEN_CV_SERVICE_TOKEN` point at the CV service
-  (local default port `8077`); leave as-is if you are not running the CV service yet.
-- `GOOGLE_OAUTH_*` are only needed when you build a real deck (Step 8b).
+Open `.env`. Paste the **three lines the owner gave you** (the `slidegen_rw` scoped
+role). They look like this (the owner fills in the real `<...>` values — do not guess them):
+
+```
+DATABASE_URL="postgresql://slidegen_rw.<PROJECT_REF>:<PASSWORD>@<POOLER_HOST>:6543/postgres?pgbouncer=true"
+DIRECT_URL="postgresql://slidegen_rw.<PROJECT_REF>:<PASSWORD>@<POOLER_HOST>:5432/postgres"
+SUPABASE_URL="https://<PROJECT_REF>.supabase.co"
+```
+
+Notes:
+- **Do NOT set `SUPABASE_SERVICE_ROLE_KEY`** — slidegen connects via Prisma (the
+  connection string above), so you never need it. (Asset/Storage uploads stay owner-side.)
+- **Keep `SLIDEGEN_MODE=dev`.**
+- **Leave `VISION_API_PROVIDER` and `GEMINI_API_KEY` blank** — they are **prod-only**;
+  setting them in dev triggers real API calls/billing (forbidden by the project rules).
+- `SLIDEGEN_CV_SERVICE_URL` / `SLIDEGEN_CV_SERVICE_TOKEN` — leave as-is unless you run the
+  CV service (default port `8077`).
+- `GOOGLE_OAUTH_*` — only needed to build a real deck (Step 8b).
 
 `.env` is gitignored — **never commit it**.
 
-## Step 5 — Database tables (`slide_*`)
+## Step 5 — Database (nothing to do as a collaborator)
 
-This project owns the `slide_*` tables — which live in a dedicated **`slidegen`
-schema** — and **reads Insighta's `public` tables read-only**. Apply the schema with
-**raw SQL** — `prisma db push` is **banned** (it silently fails on Supabase).
-Local-first, then prod.
+The `slide_*` tables (in a dedicated **`slidegen`** schema) and the scoped `slidegen_rw`
+role are **already provisioned on the shared database by the owner**. With the connection
+strings from Step 4, you are ready — **you do not run any DB setup**, and you do not need
+a local database.
 
-> **Access control:** if you are the project owner setting up a collaborator, read
-> [`docs/COLLABORATOR_ACCESS.md`](./COLLABORATOR_ACCESS.md) first — it explains the
-> least-privilege `slidegen_rw` role (so a collaborator gets read-only on Insighta
-> data + full access to `slidegen.*` only, **never** the service-role key).
+What your access allows (and nothing else):
 
-```bash
-# 1) schema + slide_* tables
-psql "$DIRECT_URL" -f prisma/migrations/slidegen-init/001_create_slide_tables.sql
-
-# 2) (owner only) scoped collaborator role — set a password in 002 first
-psql "$DIRECT_URL" -f prisma/migrations/slidegen-init/002_slidegen_role_and_grants.sql
-
-# Verify (lists the six slide_* tables in the slidegen schema)
-psql "$DIRECT_URL" -c "\dt slidegen.*"
+```
+read-only   →  public.video_rich_summaries / youtube_videos / video_captions
+read+write  →  slidegen.slide_*  (your project's own tables)
+no access   →  user data, auth, secrets, everything else
 ```
 
-> If you connect with the scoped `slidegen_rw` role, your `DATABASE_URL` already points
-> at the right account; you only need step 1/2 if you are the owner provisioning the DB.
-> If you don't have a writable database yet, skip this step — you can still run the
-> type-checks, tests, and the Claude Code workflow.
+Quick check (optional):
+```bash
+npx prisma db execute --stdin <<< "select count(*) from video_rich_summaries;"
+```
+
+> **Owner only** (provisioning / schema changes): apply
+> `prisma/migrations/slidegen-init/001_*.sql` then `002_*.sql` via the Supabase SQL
+> Editor, and see [`docs/COLLABORATOR_ACCESS.md`](./COLLABORATOR_ACCESS.md). `prisma db
+> push` is **banned** (silent-fail on Supabase) — always raw SQL, local-first.
 
 ## Step 6 — Verify the setup
 
