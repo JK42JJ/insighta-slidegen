@@ -35,22 +35,23 @@ This matches Insighta's **Service ≠ System** domain-separation rule and keeps 
 trivial: new slide_* tables created by the role are automatically owned by it, no extra
 grant needed.
 
-```
-                    Insighta Supabase DB
- ┌───────────────────────────────────────────────────────────┐
- │  schema: public  (owned by insighta admin)                 │
- │    video_rich_summaries  ─┐                                │
- │    youtube_videos         │  SELECT only                   │
- │    video_captions         ├───────────────►  slidegen_rw   │
- │    user_local_cards       │                  (collaborator)│
- │    user_video_states      │                       │        │
- │    recommendation_cache  ─┘                       │ OWNS   │
- │    auth.* / credentials / quota_*  ── NO ACCESS   ▼        │
- │  schema: slidegen  (owned by slidegen_rw)                  │
- │    slide_decks / slide_slides / slide_figures /            │
- │    slide_keyframes / slide_caption_segments / slide_jobs   │
- │      └── full read + write + migrate                        │
- └───────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph InsightaDB["Insighta Supabase DB"]
+        subgraph PublicSchema["schema: public (owned by insighta admin)"]
+            TABLES["video_rich_summaries<br/>youtube_videos<br/>video_captions<br/>user_local_cards<br/>user_video_states<br/>recommendation_cache"]
+            NOACCESS["auth.* / credentials / quota_*<br/>(NO ACCESS)"]
+        end
+        subgraph SlidegenSchema["schema: slidegen (owned by slidegen_rw)"]
+            SLIDETABLES["slide_decks / slide_slides / slide_figures<br/>slide_keyframes / slide_caption_segments / slide_jobs<br/>(full read + write + migrate)"]
+        end
+    end
+
+    ROLE["slidegen_rw<br/>(collaborator)"]
+
+    TABLES -- "SELECT only" --> ROLE
+    ROLE -- "OWNS" --> SLIDETABLES
+    NOACCESS -. "blocked" .- ROLE
 ```
 
 ## Setup (database admin / project owner)

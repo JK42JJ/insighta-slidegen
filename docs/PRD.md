@@ -91,54 +91,25 @@ A user selects an entire mandala cell and requests a "curriculum overview" deck.
 
 ### 3.1 Component Overview
 
-```
-┌────────────────────────────────────────────────────────────────────┐
-│  Insighta App (prod / local dev)                                   │
-│                                                                    │
-│  ┌──────────────┐    card trigger    ┌──────────────────────────┐  │
-│  │  Frontend    │ ─────────────────► │  slidegen orchestrator   │  │
-│  │  (card UI)   │                   │  (Node.js / TypeScript)  │  │
-│  └──────────────┘                   └───────────┬──────────────┘  │
-│                                                 │                  │
-│                                    ┌────────────▼─────────────┐   │
-│                                    │  Claude skill             │   │
-│                                    │  (deck planner / layout  │   │
-│                                    │   + figure task issuer)   │   │
-│                                    └────────────┬─────────────┘   │
-└────────────────────────────────────────────────┼────────────────┘
-                                                  │ HTTP (bearer)
-                              ┌───────────────────▼──────────────────┐
-                              │  Mac Mini CV host                     │
-                              │  (Python / FastAPI)                   │
-                              │                                       │
-                              │  ┌──────────────────────────────────┐ │
-                              │  │  yt-dlp (memory-only stream)     │ │
-                              │  │  Katna frame extractor (~80)     │ │
-                              │  │  CLIP image embeddings (512d)    │ │
-                              │  │  BGE-M3 caption embeddings       │ │
-                              │  │  pgvector cosine dedup (→~12)    │ │
-                              │  │  YOLO layout detector (post-sel) │ │
-                              │  │  PaddleOCR + Tesseract OCR        │ │
-                              │  │  pix2tex formula extractor       │ │
-                              │  │  matplotlib / plotly redrawn     │ │
-                              │  │  LaTeX / dvisvgm formula render  │ │
-                              │  │  native table renderer           │ │
-                              │  └──────────────────────────────────┘ │
-                              │                                       │
-                              │  Outputs: figure-manifest JSON +      │
-                              │  300dpi PNG + vector PDF/SVG assets   │
-                              └──────────────────────┬───────────────┘
-                                                     │ upload
-                              ┌──────────────────────▼───────────────┐
-                              │  Supabase Storage (signed URLs)       │
-                              │  slidegen bucket                      │
-                              └──────────────────────┬───────────────┘
-                                                     │
-                              ┌──────────────────────▼───────────────┐
-                              │  Google Slides API                    │
-                              │  batchUpdate + createImage            │
-                              │  + Drive export → raster PDF          │
-                              └──────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph InsightaApp["Insighta App (prod / local dev)"]
+        FE["Frontend<br/>(card UI)"]
+        ORCH["slidegen orchestrator<br/>(Node.js / TypeScript)"]
+        SKILL["Claude skill<br/>(deck planner / layout<br/>+ figure task issuer)"]
+        FE -- "card trigger" --> ORCH
+        ORCH --> SKILL
+    end
+
+    subgraph MacMini["Mac Mini CV host (Python / FastAPI)"]
+        CV["yt-dlp (memory-only stream)<br/>Katna frame extractor (~80)<br/>CLIP image embeddings (512d)<br/>BGE-M3 caption embeddings<br/>pgvector cosine dedup (→~12)<br/>YOLO layout detector (post-sel)<br/>PaddleOCR + Tesseract OCR<br/>pix2tex formula extractor<br/>matplotlib / plotly redrawn<br/>LaTeX / dvisvgm formula render<br/>native table renderer"]
+        MANIFEST["Outputs: figure-manifest JSON +<br/>300dpi PNG + vector PDF/SVG assets"]
+        CV --> MANIFEST
+    end
+
+    SKILL -- "HTTP (bearer)" --> MacMini
+    MANIFEST -- "upload" --> STORAGE["Supabase Storage (signed URLs)<br/>slidegen bucket"]
+    STORAGE --> SLIDES["Google Slides API<br/>batchUpdate + createImage<br/>+ Drive export → raster PDF"]
 ```
 
 ### 3.2 Run-Location Table

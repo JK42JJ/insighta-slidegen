@@ -24,23 +24,28 @@ Convert an Insighta video card's v2 rich-summary into a Google Slides deck and a
 
 ## Architecture
 
-```
-Insighta Supabase (read-only)
-  └─ video card + v2 rich-summary
-        │
-        ▼
-  TS Orchestrator (src/)
-        │
-        ├─► Mac Mini CV Service ──► CLIP / YOLO / OCR
-        │     (local-first; vision API fallback in prod)
-        │
-        ├─► Figure Redraw Engine (py/) ──► native SVG/PDF vectors 300 dpi
-        │
-        ├─► Google Slides Compositor (py/) ──► Google Slides deck
-        │                                       (300 dpi PNG embeds)
-        │
-        └─► Vector PDF Compositor (py/) ──► true-vector PDF
-                                             (LaTeX / reportlab)
+```mermaid
+flowchart TD
+    DB["Insighta Supabase (read-only)<br/>video card + v2 rich-summary"]
+    ORCH["TS Orchestrator (src/)"]
+    CV["Mac Mini CV Service<br/>(local-first; vision API fallback in prod)"]
+    CLIP["CLIP / YOLO / OCR"]
+    REDRAW["Figure Redraw Engine (py/)"]
+    SVG["native SVG/PDF vectors 300 dpi"]
+    SLIDES_COMP["Google Slides Compositor (py/)"]
+    SLIDES_OUT["Google Slides deck<br/>(300 dpi PNG embeds)"]
+    PDF_COMP["Vector PDF Compositor (py/)"]
+    PDF_OUT["true-vector PDF<br/>(LaTeX / reportlab)"]
+
+    DB --> ORCH
+    ORCH --> CV
+    CV --> CLIP
+    ORCH --> REDRAW
+    REDRAW --> SVG
+    ORCH --> SLIDES_COMP
+    SLIDES_COMP --> SLIDES_OUT
+    ORCH --> PDF_COMP
+    PDF_COMP --> PDF_OUT
 ```
 
 Pipeline is card-level v1: one card → one deck.
