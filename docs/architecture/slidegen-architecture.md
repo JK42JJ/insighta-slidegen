@@ -20,110 +20,61 @@
 
 > **DRAFT:** The CV frame-selection stage (Katna → CLIP → BGE-M3 → pgvector dedup → ~12) is an initial hypothesis pending research-driven finalization. See PRD §5.2.
 
-```
- ╔══════════════════════════════════════════════════════════════════════╗
- ║  INSIGHTA APP                                                        ║
- ║                                                                      ║
- ║  ┌──────────────┐   card_id + user_id   ┌────────────────────────┐  ║
- ║  │  Frontend    │ ─────────────────────► │  slidegen-orchestrator │  ║
- ║  │  card UI     │                        │  src/modules/slidegen/ │  ║
- ║  └──────────────┘                        └──────────┬─────────────┘  ║
- ║                                                     │                ║
- ║  ┌──────────────────────────────────┐              │                ║
- ║  │  Insighta Supabase DB (READ-ONLY)│◄─────────────┘ fetch          ║
- ║  │  video_rich_summaries            │  v2 rich-summary              ║
- ║  │  youtube_videos                  │  card -> video_id join        ║
- ║  │  video_captions                  │                               ║
- ║  └──────────────────────────────────┘                               ║
- ║                                                     │                ║
- ║                                          ┌──────────▼─────────────┐  ║
- ║                                          │  Claude skill           │  ║
- ║                                          │  slidegen-planner       │  ║
- ║                                          │  - deck layout plan     │  ║
- ║                                          │  - figure task specs    │  ║
- ║                                          │  - caption drafts       │  ║
- ║                                          └──────────┬─────────────┘  ║
- ╚════════════════════════════════════════════════════╪═════════════════╝
-                                                      │
-                               HTTP POST /cv-tasks    │
-                               bearer token           │
-                               ┌─────────────────────▼───────────────────┐
-                               │  MAC MINI CV HOST                        │
-                               │  mac-mini/slidegen-service/              │
-                               │                                          │
-                               │  FastAPI                                 │
-                               │  ┌────────────────────────────────────┐  │
-                               │  │  yt-dlp stream (memory-only)       │  │
-                               │  └──────────────────┬─────────────────┘  │
-                               │                     │ frame bytes         │
-                               │  ┌──────────────────▼─────────────────┐  │
-                               │  │  frame-extractor                   │  │
-                               │  │  Katna (primary, ~80 candidates)   │  │
-                               │  │  PySceneDetect (optional reinforce) │  │
-                               │  │  forced grabs (atom timestamps)    │  │
-                               │  └──────────────────┬─────────────────┘  │
-                               │                     │ ~80 candidate frames│
-                               │  ┌──────────────────▼─────────────────┐  │
-                               │  │  frame-selector                    │  │
-                               │  │  CLIP 512d embeddings (MPS)        │  │
-                               │  │  BGE-M3 caption embeddings (MPS)   │  │
-                               │  │  pgvector cosine dedup (→ ~12)     │  │
-                               │  └──────────────────┬─────────────────┘  │
-                               │                     │ ~12 selected frames │
-                               │  ┌──────────────────▼─────────────────┐  │
-                               │  │  figure-extractor                  │  │
-                               │  │  YOLO layout detector              │  │
-                               │  │  PaddleOCR + Tesseract             │  │
-                               │  │  axis-calibration (charts)         │  │
-                               │  │  TSR (tables)                      │  │
-                               │  │  pix2tex + SSIM (formulas)         │  │
-                               │  └──────────────────┬─────────────────┘  │
-                               │                     │ structured data     │
-                               │  ┌──────────────────▼─────────────────┐  │
-                               │  │  figure-redrawn                    │  │
-                               │  │  matplotlib / plotly               │  │
-                               │  │  LaTeX + dvisvgm                   │  │
-                               │  │  booktabs table renderer           │  │
-                               │  │  mermaid / graphviz                │  │
-                               │  └──────────────────┬─────────────────┘  │
-                               │                     │ PNG + SVG + PDF     │
-                               │  ┌──────────────────▼─────────────────┐  │
-                               │  │  manifest-builder                  │  │
-                               │  │  figure-manifest.json v1           │  │
-                               │  └──────────────────┬─────────────────┘  │
-                               └─────────────────────┼────────────────────┘
-                                                      │ upload assets
-                               ┌─────────────────────▼───────────────────┐
-                               │  Supabase Storage                        │
-                               │  bucket: slidegen                        │
-                               │  PNG 300dpi + SVG + vector PDF           │
-                               └─────────────────────┬────────────────────┘
-                                                      │ signed URLs
-                               ┌─────────────────────▼───────────────────┐
-                               │  orchestrator: slide-planner             │
-                               │  reads manifest + signed URLs            │
-                               │  writes slide_decks + slide_figures      │
-                               └─────────────────────┬────────────────────┘
-                                                      │
-                    ┌─────────────────────────────────┼─────────────────────┐
-                    │                                 │                     │
-          ┌─────────▼──────────┐          ┌──────────▼──────────┐          │
-          │  Google Slides API │          │  Vector PDF          │          │
-          │  batchUpdate       │          │  compositor          │          │
-          │  createImage       │          │  (LaTeX/reportlab)   │          │
-          │  (300dpi PNG embed)│          │  SVG + text layout   │          │
-          └─────────┬──────────┘          └──────────┬──────────┘          │
-                    │                                 │                     │
-          ┌─────────▼──────────┐          ┌──────────▼──────────┐          │
-          │  Google Drive      │          │  Supabase Storage    │          │
-          │  export -> raster  │          │  vector_pdf_url      │          │
-          │  PDF (Track 1)     │          │  (Track 2)           │          │
-          └────────────────────┘          └─────────────────────┘          │
-                                                                            │
-          ┌─────────────────────────────────────────────────────────────────┘
-          │  slidegen Supabase DB (READ-WRITE, own tables)
-          │  slide_decks, slide_figures, slide_oauth_tokens, slide_job_log
-          └─────────────────────────────────────────────────────────────────
+```mermaid
+graph TD
+    FE["Frontend (card UI)"]
+    ORCH["slidegen-orchestrator<br/>src/modules/slidegen/"]
+    DB[("Insighta Supabase<br/>(READ-ONLY)<br/>video_rich_summaries<br/>youtube_videos<br/>video_captions")]
+    SKILL["Claude skill:<br/>slidegen-planner<br/>- deck layout plan<br/>- figure task specs<br/>- caption drafts"]
+    
+    CV["MAC MINI CV HOST<br/>(FastAPI)"]
+    YTDLP["yt-dlp stream<br/>(memory-only)"]
+    EXTRACT["frame-extractor<br/>Katna ~80 candidates<br/>PySceneDetect<br/>forced grabs"]
+    SELECT["frame-selector<br/>CLIP 512d embeddings<br/>BGE-M3 captions<br/>pgvector dedup→~12"]
+    FIGEXT["figure-extractor<br/>YOLO layout<br/>PaddleOCR + Tesseract<br/>axis-calibration<br/>TSR + pix2tex"]
+    REDRAW["figure-redrawn<br/>matplotlib / plotly<br/>LaTeX + dvisvgm<br/>booktabs<br/>mermaid / graphviz"]
+    MANIFEST["manifest-builder<br/>figure-manifest.json v1"]
+    
+    STORAGE[("Supabase Storage<br/>bucket: slidegen<br/>PNG 300dpi + SVG + vector PDF")]
+    PLANNER["orchestrator: slide-planner<br/>reads manifest + signed URLs<br/>writes slide_decks + slide_figures"]
+    
+    SLIDES["Google Slides API<br/>batchUpdate + createImage<br/>300dpi PNG embed"]
+    DRIVE["Google Drive<br/>export → raster PDF<br/>Track 1"]
+    PDFCOMP["Vector PDF Compositor<br/>LaTeX / reportlab<br/>SVG + text layout<br/>Track 2"]
+    PDFSTORE[("Supabase Storage<br/>vector_pdf_url")]
+    
+    SLIDEDB[("slidegen Supabase DB<br/>(READ-WRITE)<br/>slide_decks<br/>slide_figures<br/>slide_oauth_tokens<br/>slide_job_log")]
+    
+    FE -->|card_id + user_id| ORCH
+    ORCH -->|fetch v2 rich-summary| DB
+    ORCH -->|invoke| SKILL
+    ORCH -->|POST /cv-tasks<br/>bearer token| CV
+    
+    CV --> YTDLP
+    YTDLP --> EXTRACT
+    EXTRACT -->|~80 candidate frames| SELECT
+    SELECT -->|~12 selected frames| FIGEXT
+    FIGEXT -->|structured data| REDRAW
+    REDRAW -->|PNG + SVG + PDF| MANIFEST
+    MANIFEST -->|upload assets| STORAGE
+    
+    STORAGE -->|signed URLs| PLANNER
+    PLANNER -->|figure-manifest.json| ORCH
+    
+    ORCH --> SLIDES
+    ORCH --> PDFCOMP
+    SLIDES --> DRIVE
+    PDFCOMP --> PDFSTORE
+    
+    ORCH -.write metadata.-> SLIDEDB
+    DRIVE -.->|Track 1| SLIDEDB
+    PDFSTORE -.->|Track 2| SLIDEDB
+    
+    style CV fill:#f3e5f5
+    style STORAGE fill:#e1f5ff
+    style SLIDEDB fill:#e1f5ff
+    style PDFSTORE fill:#e1f5ff
+    style DB fill:#e1f5ff
 ```
 
 ---
@@ -250,56 +201,43 @@ The Mac Mini CV host produces a figure manifest JSON document after completing a
 
 ## 5. Single Deck Build — Sequence Diagram
 
-```
-Orchestrator          Claude skill       Mac Mini CV        Supabase Storage    Google Slides API
-     │                     │                  │                    │                   │
-     │─── fetch v2 ───────►│                  │                    │                   │
-     │    rich-summary      │                  │                    │                   │
-     │◄── v2 JSON ─────────│                  │                    │                   │
-     │                     │                  │                    │                   │
-     │─── invoke ─────────►│                  │                    │                   │
-     │    slidegen-planner  │                  │                    │                   │
-     │◄── deck plan ───────│                  │                    │                   │
-     │    + figure tasks    │                  │                    │                   │
-     │                     │                  │                    │                   │
-     │─── POST /cv-tasks ──────────────────►  │                    │                   │
-     │    {task_id, video_id, sections[]}      │                    │                   │
-     │                     │                  │                    │                   │
-     │                     │    yt-dlp stream (memory-only)         │                   │
-     │                     │         │        │                    │                   │
-     │                     │   Katna extract (~80) + forced grabs   │                   │
-     │                     │         │        │                    │                   │
-     │                     │   CLIP + BGE-M3 + pgvector dedup→~12  │                   │
-     │                     │         │        │                    │                   │
-     │                     │   YOLO layout + OCR + axis-cal + pix2tex                  │
-     │                     │         │        │                    │                   │
-     │                     │   redraw (matplotlib/LaTeX)            │                   │
-     │                     │         │        │                    │                   │
-     │                     │   ─── upload PNG+SVG+PDF ────────────►│                   │
-     │                     │         │        │◄── signed URLs ────│                   │
-     │                     │         │        │                    │                   │
-     │◄── figure-manifest.json ───────────────│                    │                   │
-     │    {figures[], schema_version}          │                    │                   │
-     │                     │                  │                    │                   │
-     │─── validate manifest │                  │                    │                   │
-     │    write slide_figures                  │                    │                   │
-     │                     │                  │                    │                   │
-     │─── batchUpdate ────────────────────────────────────────────────────────────────►│
-     │    createImage (300dpi PNG signed URLs) │                    │                   │
-     │    speaker notes                        │                    │                   │
-     │◄── presentationId ──────────────────────────────────────────────────────────────│
-     │                     │                  │                    │                   │
-     │─── Drive export ────────────────────────────────────────────────────────────────►
-     │    raster PDF (Track 1)                 │                    │                   │
-     │                     │                  │                    │                   │
-     │─── vector PDF compositor                │                    │                   │
-     │    (LaTeX/reportlab, Track 2)           │                    │                   │
-     │─── upload Track 2 PDF ─────────────────────────────────────►│                   │
-     │                     │                  │                    │                   │
-     │─── update slide_decks                   │                    │                   │
-     │    status=ready, slides_url, pdf URLs   │                    │                   │
-     │                     │                  │                    │                   │
-     │─── (human review) ──│                  │                    │                   │
-     │    human_approved=true                  │                    │                   │
-     │    status=published  │                  │                    │                   │
+```mermaid
+sequenceDiagram
+    participant Orch as Orchestrator
+    participant Skill as Claude Skill<br/>(slidegen-planner)
+    participant CV as Mac Mini CV
+    participant Store as Supabase Storage
+    participant Slides as Google Slides API
+    
+    Orch->>Skill: fetch v2 rich-summary
+    Skill-->>Orch: v2 JSON
+    
+    Orch->>Skill: invoke slidegen-planner
+    Skill-->>Orch: deck plan + figure tasks
+    
+    Orch->>CV: POST /cv-tasks<br/>{task_id, video_id, sections[]}
+    
+    CV->>CV: yt-dlp stream (memory-only)
+    CV->>CV: Katna extract (~80) + forced grabs
+    CV->>CV: CLIP + BGE-M3 + pgvector dedup→~12
+    CV->>CV: YOLO layout + OCR + axis-cal
+    CV->>CV: redraw (matplotlib/LaTeX)
+    CV->>Store: upload PNG+SVG+PDF
+    Store-->>CV: signed URLs
+    
+    CV-->>Orch: figure-manifest.json<br/>{figures[], schema_version}
+    
+    Orch->>Orch: validate manifest<br/>write slide_figures
+    
+    Orch->>Slides: batchUpdate + createImage<br/>(300dpi PNG signed URLs)<br/>speaker notes
+    Slides-->>Orch: presentationId
+    
+    Orch->>Slides: Drive export<br/>raster PDF (Track 1)
+    
+    Orch->>Orch: vector PDF compositor<br/>(LaTeX/reportlab, Track 2)
+    Orch->>Store: upload Track 2 PDF
+    
+    Orch->>Orch: update slide_decks<br/>status=ready, slides_url, pdf URLs
+    
+    Note over Orch: (human review)<br/>human_approved=true<br/>status=published
 ```
