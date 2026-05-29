@@ -1,0 +1,27 @@
+# lefthook — repo-shared git hooks (installed on `npm install` via the "prepare" script).
+# Goal: keep collaborators current with origin/main without relying on memory/discipline.
+#
+# pre-push behavior:
+#   - fetch origin (read-only)
+#   - if local main is behind origin/main → BLOCK the push (pull --ff-only first)
+#   - if a feature branch is behind origin/main → WARN (rebase before the PR;
+#     the GitHub ruleset enforces up-to-date at merge time)
+
+pre-push:
+  parallel: false
+  commands:
+    stay-current:
+      run: |
+        git fetch origin --quiet 2>/dev/null || true
+        BEHIND=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
+        BR=$(git branch --show-current)
+        if [ "${BEHIND:-0}" -gt 0 ]; then
+          if [ "$BR" = "main" ]; then
+            echo "🚫 push blocked — local main is ${BEHIND} commit(s) behind origin/main."
+            echo "   Run: git pull --ff-only origin main   then push again."
+            exit 1
+          else
+            echo "⚠️ '${BR}' is ${BEHIND} commit(s) behind origin/main — rebase before opening/updating the PR"
+            echo "   (merge requires the branch to be up to date)."
+          fi
+        fi

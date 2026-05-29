@@ -20,7 +20,8 @@
     "test:cov": "vitest run --coverage",
     "slidegen": "node dist/cli/index.js",
     "prisma:generate": "prisma generate",
-    "prisma:studio": "prisma studio"
+    "prisma:studio": "prisma studio",
+    "prepare": "lefthook install"
   },
   "keywords": [
     "slides",
@@ -47,8 +48,8 @@
   "dependencies": {
     "@prisma/client": "^5.7.1",
     "dotenv": "^16.3.1",
-    "zod": "^3.22.4",
-    "tslib": "^2.8.1"
+    "tslib": "^2.8.1",
+    "zod": "^3.22.4"
   },
   "devDependencies": {
     "@types/node": "^20.10.6",
@@ -57,6 +58,7 @@
     "eslint": "^8.56.0",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-prettier": "^5.1.2",
+    "lefthook": "^2.1.9",
     "prettier": "^3.1.1",
     "prisma": "^5.7.1",
     "tsx": "^4.7.0",

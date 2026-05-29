@@ -24,14 +24,16 @@ Stay current with collaborators. **Always fetch; only pull/switch when the worki
 
 ```bash
 git fetch origin --quiet
-if [ -z "$(git status --porcelain)" ]; then
+# "clean enough to sync" = no tracked/staged changes. Untracked files (local artifacts,
+# generated lockfiles, etc.) do NOT block an ff-only pull, so they are ignored here.
+if git diff --quiet && git diff --cached --quiet; then
   if git switch main 2>/dev/null && git pull --ff-only origin main 2>/dev/null; then
     echo "✓ main synced to origin/main — branch new work from here"
   else
     echo "⚠️ could not ff-only pull main (diverged?) — resolve manually before branching"
   fi
 else
-  echo "⚠️ working tree not clean — auto-sync skipped. Commit/stash, then pull main before creating a work branch."
+  echo "⚠️ tracked changes present — auto-sync skipped. Commit/stash, then pull main before creating a work branch."
 fi
 ```
 
