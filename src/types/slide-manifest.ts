@@ -2,7 +2,7 @@
  * Zod schemas and inferred TypeScript types for the slidegen pipeline.
  * All inter-module contracts use these types; no ad-hoc inline types.
  */
-import { z } from "zod";
+import { z } from 'zod';
 
 // ----------------------------------------------------------------
 // V2 Summary mirror (fail-loud validation at fetch time)
@@ -33,9 +33,7 @@ const V2CoreSchema = z.object({
   title: z.string().optional(),
   one_liner: z.string().optional(),
   key_concepts: z.array(z.string()).optional(),
-  qa_pairs: z
-    .array(z.object({ q: z.string(), a: z.string() }))
-    .optional(),
+  qa_pairs: z.array(z.object({ q: z.string(), a: z.string() })).optional(),
 });
 
 const V2AnalysisSchema = z.object({
@@ -46,9 +44,9 @@ const V2AnalysisSchema = z.object({
 /** Zod mirror of the v2 video_rich_summaries row consumed by slidegen. */
 export const V2SummarySchema = z.object({
   video_id: z.string().length(11),
-  template_version: z.literal("v2"),
+  template_version: z.literal('v2'),
   source_language: z.string().nullable().optional(),
-  quality_flag: z.literal("pass"),
+  quality_flag: z.literal('pass'),
   transcript_used: z.literal(true),
   core: V2CoreSchema.nullable().optional(),
   analysis: V2AnalysisSchema.nullable().optional(),
@@ -68,15 +66,15 @@ export type V2Entity = z.infer<typeof V2EntitySchema>;
 
 /** Available layout identifiers — must match templates.ts LAYOUT_MAP keys. */
 export const LayoutEnum = z.enum([
-  "cover",
-  "section_intro",
-  "key_points",
-  "qa_pair",
-  "figure_full",
-  "figure_caption",
-  "timeline",
-  "summary",
-  "blank",
+  'cover',
+  'section_intro',
+  'key_points',
+  'qa_pair',
+  'figure_full',
+  'figure_caption',
+  'timeline',
+  'summary',
+  'blank',
 ]);
 
 export type Layout = z.infer<typeof LayoutEnum>;
@@ -88,7 +86,7 @@ export type Layout = z.infer<typeof LayoutEnum>;
 /** A figure produced by the CV service, ready to embed in a slide. */
 export const FigureRefSchema = z.object({
   cv_figure_id: z.string(),
-  kind: z.enum(["chart", "diagram", "equation", "table", "screenshot", "keyframe"]),
+  kind: z.enum(['chart', 'diagram', 'equation', 'table', 'screenshot', 'keyframe']),
   png_url: z.string().url(),
   vector_pdf_url: z.string().url().optional(),
   vector_svg_url: z.string().url().optional(),

@@ -7,8 +7,8 @@
  *   slide_slides — delete-then-insert for a given deck_id (full rebuild).
  *   slide_figures — delete-then-insert for a given deck_id.
  */
-import { PrismaClient } from "@prisma/client";
-import type { SlideOutline, FigureRef } from "@/types/slide-manifest";
+import { PrismaClient } from '@prisma/client';
+import type { SlideOutline, FigureRef } from '@/types/slide-manifest';
 
 export interface UpsertDeckResult {
   deckId: string;
@@ -34,7 +34,7 @@ export async function upsertDeck(
   _userId: string | undefined,
   _prisma: PrismaClient
 ): Promise<UpsertDeckResult> {
-  throw new Error("TODO: upsertDeck — prisma.slide_decks.upsert on (video_id, generator_version)");
+  throw new Error('TODO: upsertDeck — prisma.slide_decks.upsert on (video_id, generator_version)');
 }
 
 /**
@@ -51,7 +51,7 @@ export async function replaceSlides(
   _outline: SlideOutline,
   _prisma: PrismaClient
 ): Promise<void> {
-  throw new Error("TODO: replaceSlides — deleteMany + createMany within a transaction");
+  throw new Error('TODO: replaceSlides — deleteMany + createMany within a transaction');
 }
 
 /**
@@ -68,7 +68,7 @@ export async function replaceFigures(
   _figures: FigureRef[],
   _prisma: PrismaClient
 ): Promise<void> {
-  throw new Error("TODO: replaceFigures — deleteMany + createMany");
+  throw new Error('TODO: replaceFigures — deleteMany + createMany');
 }
 
 /**
@@ -88,5 +88,5 @@ export async function setDeckStatus(
   _error: string | null,
   _prisma: PrismaClient
 ): Promise<void> {
-  throw new Error("TODO: setDeckStatus — prisma.slide_decks.update");
+  throw new Error('TODO: setDeckStatus — prisma.slide_decks.update');
 }

@@ -21,8 +21,8 @@
  * No direct vision API calls happen here; this client only speaks to the
  * FastAPI service which owns that decision.
  */
-import { config } from "@/config";
-import type { FigureRef } from "@/types/slide-manifest";
+import { config } from '@/config';
+import type { FigureRef } from '@/types/slide-manifest';
 
 export interface CvGenerateRequest {
   youtube_video_id: string;
@@ -31,12 +31,12 @@ export interface CvGenerateRequest {
     from_sec: number;
     to_sec: number;
   }>;
-  mode: "dev" | "prod";
+  mode: 'dev' | 'prod';
 }
 
 export interface CvJobStatus {
   job_id: string;
-  status: "queued" | "running" | "done" | "error";
+  status: 'queued' | 'running' | 'done' | 'error';
   progress_pct: number;
   error?: string;
 }
@@ -68,13 +68,11 @@ export interface CvGenerateResult {
  *
  * TODO: implement — use fetch(); add exponential backoff on transient 5xx.
  */
-export async function extractFigures(
-  _request: CvGenerateRequest
-): Promise<FigureRef[]> {
+export async function extractFigures(_request: CvGenerateRequest): Promise<FigureRef[]> {
   // config accessed at runtime for SLIDEGEN_CV_SERVICE_URL + TOKEN
   void config;
   throw new Error(
-    "TODO: extractFigures — POST /slides/generate, poll /slides/status, GET /slides/result"
+    'TODO: extractFigures — POST /slides/generate, poll /slides/status, GET /slides/result'
   );
 }
 
@@ -86,5 +84,5 @@ export async function extractFigures(
  */
 export async function isCvServiceHealthy(): Promise<boolean> {
   void config;
-  throw new Error("TODO: isCvServiceHealthy — GET /health");
+  throw new Error('TODO: isCvServiceHealthy — GET /health');
 }

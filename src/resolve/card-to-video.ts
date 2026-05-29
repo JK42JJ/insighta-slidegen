@@ -11,7 +11,7 @@
  * declared in prisma/schema.prisma under the "READ MIRROR" section; this
  * function never writes to insighta tables.
  */
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from '@prisma/client';
 
 export interface CardVideoResult {
   youtubeVideoId: string;
@@ -47,6 +47,6 @@ export async function resolveCardToVideo(
   // TODO: join user_video_states → youtube_videos on video_id UUID FK,
   // assert ownership when _userId is provided, return CardVideoResult.
   throw new Error(
-    "TODO: resolveCardToVideo — join user_video_states → youtube_videos, return youtubeVideoId"
+    'TODO: resolveCardToVideo — join user_video_states → youtube_videos, return youtubeVideoId'
   );
 }

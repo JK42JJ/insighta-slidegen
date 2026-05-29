@@ -19,28 +19,23 @@
  *   - config is loaded once at startup; never read process.env inline.
  *   - plan→approve→execute: logs SlideOutline, pauses unless --yes.
  */
-import { parseArgs } from "util";
-import { PrismaClient } from "@prisma/client";
-import { config } from "@/config";
-import { resolveCardToVideo } from "@/resolve/card-to-video";
-import { fetchV2 } from "@/fetch/v2-reader";
-import { extractFigures } from "@/cv/cv-client";
-import { planSlides } from "@/plan/slide-planner";
-import {
-  upsertDeck,
-  replaceSlides,
-  replaceFigures,
-  setDeckStatus,
-} from "@/db/slide-repo";
+import { parseArgs } from 'util';
+import { PrismaClient } from '@prisma/client';
+import { config } from '@/config';
+import { resolveCardToVideo } from '@/resolve/card-to-video';
+import { fetchV2 } from '@/fetch/v2-reader';
+import { extractFigures } from '@/cv/cv-client';
+import { planSlides } from '@/plan/slide-planner';
+import { upsertDeck, replaceSlides, replaceFigures, setDeckStatus } from '@/db/slide-repo';
 
 async function main(): Promise<void> {
   const { values } = parseArgs({
     args: process.argv.slice(2),
     options: {
-      card:  { type: "string" },
-      video: { type: "string" },
-      yes:   { type: "boolean", default: false },
-      lang:  { type: "string" },
+      card: { type: 'string' },
+      video: { type: 'string' },
+      yes: { type: 'boolean', default: false },
+      lang: { type: 'string' },
     },
     allowPositionals: true,
   });
@@ -57,7 +52,7 @@ async function main(): Promise<void> {
     } else if (values.video !== undefined) {
       youtubeVideoId = values.video;
     } else {
-      console.error("Error: provide --card <uuid> or --video <yt-id>");
+      console.error('Error: provide --card <uuid> or --video <yt-id>');
       process.exit(1);
       return; // unreachable; narrows type for the compiler
     }
@@ -89,19 +84,18 @@ async function main(): Promise<void> {
 
     // Steps 6-7: delegate to Python (deck_builder + pdf_vector_compositor)
     // TODO: spawn Python subprocess with deckId, update deck status on completion
-    await setDeckStatus(deckId, "building", null, prisma);
+    await setDeckStatus(deckId, 'building', null, prisma);
     console.log(`[done] deckId=${deckId} — Python build step TODO`);
-
   } catch (err) {
     if (deckId !== undefined) {
       // Best-effort status update; ignore secondary errors
-      await setDeckStatus(deckId, "error", String(err), prisma).catch(() => undefined);
+      await setDeckStatus(deckId, 'error', String(err), prisma).catch(() => undefined);
     }
-    console.error("[error]", err);
+    console.error('[error]', err);
     process.exit(1);
   } finally {
     await prisma.$disconnect();
   }
 }
 
-main();
+void main();

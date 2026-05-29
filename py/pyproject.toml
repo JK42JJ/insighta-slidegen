@@ -27,3 +27,8 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+# Make the slides_build package importable without `pip install -e .`
+# (rootdir is py/, so "." adds py/ to sys.path).
+pythonpath = ["."]

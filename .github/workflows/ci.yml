@@ -6,18 +6,10 @@ name: CI
 on:
   pull_request:
     branches: [main]
-    # Path filter: skip CI entirely when only docs/assets change.
-    paths:
-      - 'src/**'
-      - 'py/**'
-      - 'mac-mini/**'
-      - 'tests/**'
-      - 'prisma/**'
-      - 'package*.json'
-      - 'tsconfig*.json'
-      - '.eslintrc.json'
-      - 'requirements*.txt'
-      - '.github/workflows/ci.yml'
+    # NO paths filter on purpose: main's ruleset requires these checks to pass before
+    # merge, so CI must run on EVERY PR. A paths filter would skip CI on docs-only PRs,
+    # leaving the required checks unreported → the PR becomes unmergeable. Running a few
+    # fast jobs on a docs PR is cheaper than that deadlock.
   workflow_call:
 
 # Cancel superseded runs for the same PR/branch. deploy.yml keeps

@@ -20,7 +20,7 @@
  *   - No figures from CV: skip all figure_* slides.
  *   - mandala_relevance_pct < 30: append a relevance-disclaimer blank slide.
  */
-import type { V2Summary, V2Section } from "@/types/slide-manifest";
+import type { V2Summary, V2Section } from '@/types/slide-manifest';
 
 export interface NarrativePlan {
   /** Ordered list of step descriptors; slide-planner maps these to Slide objects. */
@@ -28,14 +28,14 @@ export interface NarrativePlan {
 }
 
 export type NarrativeStep =
-  | { type: "cover" }
-  | { type: "timeline" }
-  | { type: "section_intro"; sectionIndex: number; section: V2Section }
-  | { type: "key_points"; sectionIndex: number; section: V2Section }
-  | { type: "figure_slot"; sectionIndex: number; figureIndex: number }
-  | { type: "qa_pair"; qaIndex: number }
-  | { type: "summary" }
-  | { type: "blank"; reason: string };
+  | { type: 'cover' }
+  | { type: 'timeline' }
+  | { type: 'section_intro'; sectionIndex: number; section: V2Section }
+  | { type: 'key_points'; sectionIndex: number; section: V2Section }
+  | { type: 'figure_slot'; sectionIndex: number; figureIndex: number }
+  | { type: 'qa_pair'; qaIndex: number }
+  | { type: 'summary' }
+  | { type: 'blank'; reason: string };
 
 /**
  * Builds the narrative step sequence from a validated V2Summary.
@@ -54,10 +54,7 @@ export type NarrativeStep =
  *
  * TODO: implement the sequencing logic.
  */
-export function buildNarrativePlan(
-  _summary: V2Summary,
-  _figureCount: number
-): NarrativePlan {
+export function buildNarrativePlan(_summary: V2Summary, _figureCount: number): NarrativePlan {
   // TODO: implement deterministic narrative arc (see module docstring for full arc)
-  throw new Error("TODO: buildNarrativePlan — implement deterministic narrative arc");
+  throw new Error('TODO: buildNarrativePlan — implement deterministic narrative arc');
 }
