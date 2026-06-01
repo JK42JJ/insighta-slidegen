@@ -4,6 +4,7 @@ opencv-python>=4.9
 scenedetect[opencv]>=0.6
 katna>=0.9
 open-clip-torch>=2.24
+pillow>=10.0
 ultralytics>=8.1
 paddleocr>=2.7
 pix2tex>=0.1
