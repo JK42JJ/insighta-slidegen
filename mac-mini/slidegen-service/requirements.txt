@@ -3,11 +3,15 @@ yt-dlp>=2024.1
 opencv-python>=4.9
 scenedetect[opencv]>=0.6
 katna>=0.9
-open-clip-torch>=2.24
 pillow>=10.0
-ultralytics>=8.1
+# Semantic routing VLM (local, Apple Silicon via MLX) — ADR 0001. Replaces CLIP.
+# Apple-Silicon-only runtime; skipped on the Linux CI runner (tests mock it).
+mlx-vlm>=0.1; sys_platform == "darwin"
+# Document layout detection (graph/table region crop) — ADR 0001. Replaces YOLOv8.
+doclayout-yolo>=0.0.2
+# Equation OCR → LaTeX — ADR 0001. Replaces pix2tex. Fallback: PP-FormulaNet.
+unimernet>=0.1
 paddleocr>=2.7
-pix2tex>=0.1
 matplotlib>=3.8
 plotly>=5.18
 realesrgan>=0.3
