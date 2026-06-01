@@ -170,17 +170,38 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
         95%  redraw.vector_redraw(figures)                  → 300 DPI vector output
         100% Done — write figures to _jobs[job_id]["figures"]
 
-    TODO: implement each step call and update progress.
     On exception: set status='error', error=str(e).
     """
     try:
         _jobs[job_id]["status"] = "running"
-        # step 1 — acquire
-        # step 2 — frames (katna ~80 candidates)
+
+        # Step 1: acquire (15%) — download video + extract JPEG frames
+        sections = [s.model_dump() for s in req.sections]
+        frames_dir = download_frames(req.youtube_video_id, sections)
+        _jobs[job_id]["progress_pct"] = 15.0
+
+        # Step 2: frames (30%) — Katna ~80 candidate frames
+        video_path = frames_dir / "video.mp4"
+        candidates = extract_candidates(video_path)
+        _jobs[job_id]["progress_pct"] = 30.0
+
+        # Step 3-6: TODO (remaining stages)
         # step 3 — captions (bge-m3 topic-change points)
         # step 4 — typing_select (clip + pgvector dedup → ~12)
         # step 5 — figure_extract (yolo/ocr on selected)
         # step 6 — redraw (vector 300dpi)
-        _jobs[job_id].update({"status": "done", "progress_pct": 100.0, "figures": [], "keyframe_count": 0})
+
+        # Placeholder output
+        _jobs[job_id].update({
+            "status": "done",
+            "progress_pct": 100.0,
+            "figures": [],
+            "keyframe_count": len(candidates),
+        })
+
     except Exception as exc:
-        _jobs[job_id].update({"status": "error", "error": str(exc), "progress_pct": 0.0})
+        _jobs[job_id].update({
+            "status": "error",
+            "error": str(exc),
+            "progress_pct": 0.0,
+        })

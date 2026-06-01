@@ -3,7 +3,6 @@ Trivial passing test for the FastAPI CV service health endpoint.
 Uses TestClient so no real server or network is required.
 """
 
-import pytest
 from fastapi.testclient import TestClient
 
 
