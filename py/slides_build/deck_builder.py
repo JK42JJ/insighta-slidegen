@@ -27,10 +27,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
-
-from slides_build.manifest_io import load_manifest, manifest_path, SlideOutline
-from slides_build import auth, layouts
 
 
 def build_deck(deck_id: str) -> dict:
@@ -48,14 +44,14 @@ def build_deck(deck_id: str) -> dict:
         NotImplementedError: until fully implemented.
 
     TODO:
-        1. load_manifest(manifest_path(deck_id)) → outline
-        2. credentials = auth.get_credentials()
-        3. service = auth.build_slides_service(credentials)
-        4. presentation = service.presentations().create(body={"title": outline.slides[0].title or deck_id}).execute()
-        5. presentation_id = presentation["presentationId"]
-        6. Accumulate batchUpdate requests per slide using layouts.*_requests()
-        7. service.presentations().batchUpdate(presentationId=presentation_id, body={"requests": all_requests}).execute()
-        8. Return {"google_slides_id": presentation_id, "google_slides_url": f"https://docs.google.com/presentation/d/{presentation_id}"}
+        1. outline = load_manifest(manifest_path(deck_id))
+        2. creds = auth.get_credentials(); svc = auth.build_slides_service(creds)
+        3. Create a presentation titled outline.slides[0].title or deck_id;
+           presentation_id = presentation["presentationId"].
+        4. Accumulate batchUpdate requests per slide via layouts.*_requests().
+        5. svc.presentations().batchUpdate(presentationId=..., body={"requests": ...}).
+        6. Return {"google_slides_id": presentation_id,
+                   "google_slides_url": ".../presentation/d/<presentation_id>"}.
     """
     raise NotImplementedError(f"TODO: build_deck deck_id={deck_id}")
 

@@ -4,13 +4,11 @@ These verify that imports work and the Pydantic model validates fixture data.
 """
 
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
 
 from slides_build.manifest_io import SlideOutline, load_manifest, manifest_path
-
 
 FIXTURE_MANIFEST = {
     "video_id": "dQw4w9WgXcQ",

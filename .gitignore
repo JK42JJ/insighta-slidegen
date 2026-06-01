@@ -66,6 +66,10 @@ tmp/
 # Only local settings are ignored (already covered by *.local.json above).
 .claude/settings.local.json
 
+# memsearch local index + memory snapshots (machine-local; may hold memory
+# content — NEVER commit to this PUBLIC repo).
+.memsearch/
+
 # Prisma dev DB
 prisma/dev.db
 prisma/dev.db-journal
