@@ -23,12 +23,12 @@ datasource db {
 /// video_id is NOT the PK; surrogate uuid + (video_id, generator_version) unique
 /// allows re-generation without clobbering the previous deck.
 model slide_decks {
-  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  video_id          String    @db.VarChar(11)
-  mandala_id        String?   @db.Uuid
-  user_id           String?   @db.Uuid
-  lang              String    @default("ko") @db.VarChar(5)
-  status            String    @default("queued") @db.VarChar(20)
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  video_id          String   @db.VarChar(11)
+  mandala_id        String?  @db.Uuid
+  user_id           String?  @db.Uuid
+  lang              String   @default("ko") @db.VarChar(5)
+  status            String   @default("queued") @db.VarChar(20)
   slides_json       Json?
   slide_count       Int?
   google_slides_id  String?
@@ -36,15 +36,15 @@ model slide_decks {
   pdf_url           String?
   vector_pdf_url    String?
   /// SHA-256 of video_id + template_version + generator_version: stale-deck detection.
-  v2_fingerprint    String?   @db.VarChar(64)
-  generator_version String    @default("slidegen-v1") @db.VarChar(30)
+  v2_fingerprint    String?  @db.VarChar(64)
+  generator_version String   @default("slidegen-v1") @db.VarChar(30)
   error             String?
-  created_at        DateTime  @default(now()) @db.Timestamptz(6)
-  updated_at        DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+  created_at        DateTime @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
-  slides   slide_slides[]
-  figures  slide_figures[]
-  jobs     slide_jobs[]
+  slides  slide_slides[]
+  figures slide_figures[]
+  jobs    slide_jobs[]
 
   @@unique([video_id, generator_version], map: "uq_slide_decks_video_version")
   @@index([video_id], map: "idx_slide_decks_video_id")
@@ -91,6 +91,10 @@ model slide_figures {
   /// "pending" | "verified" | "rejected"
   verification_status String  @default("pending") @db.VarChar(20)
   extraction_conf     Float?
+  /// Equation OCR (UniMERNet) LaTeX for kind=equation figures (ADR 0001).
+  extracted_latex     String?
+  /// DocLayout-YOLO crop region {x,y,w,h} in source-frame pixels (ADR 0001).
+  bbox                Json?
 
   deck  slide_decks   @relation(fields: [deck_id], references: [id])
   slide slide_slides? @relation(fields: [slide_id], references: [id])
@@ -100,23 +104,33 @@ model slide_figures {
   @@schema("slidegen")
 }
 
-/// CLIP-embedded keyframes extracted by the Mac Mini CV service.
-/// clip_embedding uses pgvector; DDL applied via raw SQL (Unsupported type).
+/// Keyframes selected by the Mac Mini CV service.
+/// Selection is by a local VLM router (Qwen2.5-VL) — see ADR 0001. The
+/// clip_embedding / clip_model columns are DEPRECATED (CLIP selection removed)
+/// but kept nullable for back-compat; no new writes.
 model slide_keyframes {
-  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  youtube_video_id String  @db.VarChar(11)
-  section_index   Int
-  timestamp_sec   Float
+  id                String                      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  youtube_video_id  String                      @db.VarChar(11)
+  section_index     Int
+  timestamp_sec     Float
   /// "scene_change" | "title_card" | "diagram" | "chart" | "face" | "b_roll"
-  frame_type      String   @db.VarChar(16)
-  type_confidence Float?
-  selection_score Float?
-  clip_model      String   @default("clip-vit-b32") @db.VarChar(32)
-  /// pgvector 512-dim embedding. Declared Unsupported; HNSW index in raw SQL.
-  clip_embedding  Unsupported("vector(512)")?
-  quality_score   Float?
-  is_selected     Boolean  @default(false)
-  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  frame_type        String                      @db.VarChar(16)
+  type_confidence   Float?
+  selection_score   Float?
+  /// VLM router (Qwen2.5-VL): frame contains a chart/graph/diagram region (ADR 0001).
+  contains_graph    Boolean                     @default(false)
+  /// VLM router (Qwen2.5-VL): frame contains a mathematical equation (ADR 0001).
+  contains_equation Boolean                     @default(false)
+  /// VLM router (Qwen2.5-VL): brief description of the slide content (ADR 0001).
+  summary_hint      String?
+  /// DEPRECATED (ADR 0001): vestigial from CLIP selection.
+  clip_model        String                      @default("clip-vit-b32") @db.VarChar(32)
+  /// DEPRECATED (ADR 0001): CLIP selection replaced by Qwen2.5-VL routing.
+  /// pgvector 512-dim embedding; kept nullable for back-compat. HNSW index in raw SQL.
+  clip_embedding    Unsupported("vector(512)")?
+  quality_score     Float?
+  is_selected       Boolean                     @default(false)
+  created_at        DateTime                    @default(now()) @db.Timestamptz(6)
 
   @@index([youtube_video_id, section_index], map: "idx_slide_keyframes_video_section")
   @@index([is_selected], map: "idx_slide_keyframes_is_selected")
@@ -127,17 +141,17 @@ model slide_keyframes {
 /// Populated by captions.py (mac-mini CV service) before keyframe selection.
 /// embedding is 1024-dim (BAAI/bge-m3); HNSW index in raw SQL.
 model slide_caption_segments {
-  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  youtube_video_id String   @db.VarChar(11)
+  id               String                       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  youtube_video_id String                       @db.VarChar(11)
   from_sec         Float
   to_sec           Float
   text             String
   /// True when cosine distance to previous segment exceeds topic-change threshold.
-  is_topic_change  Boolean  @default(false)
+  is_topic_change  Boolean                      @default(false)
   /// pgvector 1024-dim BGE-M3 embedding. Declared Unsupported; HNSW index in raw SQL.
   embedding        Unsupported("vector(1024)")?
-  model_version    String   @default("bge-m3") @db.VarChar(32)
-  created_at       DateTime @default(now()) @db.Timestamptz(6)
+  model_version    String                       @default("bge-m3") @db.VarChar(32)
+  created_at       DateTime                     @default(now()) @db.Timestamptz(6)
 
   @@index([youtube_video_id], map: "idx_slide_caption_segments_video_id")
   @@schema("slidegen")
@@ -173,11 +187,11 @@ model slide_jobs {
 /// Read-mirror of insighta.video_rich_summaries.
 /// Only the columns consumed by slidegen are declared here.
 model video_rich_summaries {
-  video_id              String   @id @db.VarChar(11)
-  template_version      String   @default("v1") @db.VarChar(10)
-  source_language       String?  @db.VarChar(5)
-  quality_flag          String?  @db.VarChar(20)
-  transcript_used       Boolean  @default(false)
+  video_id              String  @id @db.VarChar(11)
+  template_version      String  @default("v1") @db.VarChar(10)
+  source_language       String? @db.VarChar(5)
+  quality_flag          String? @db.VarChar(20)
+  transcript_used       Boolean @default(false)
   core                  Json?
   analysis              Json?
   segments              Json?

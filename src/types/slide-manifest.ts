@@ -94,6 +94,8 @@ export const FigureRefSchema = z.object({
   timestamp_sec: z.number().int().optional(),
   atom_refs: z.array(z.number().int()).optional(),
   extraction_conf: z.number().min(0).max(1).optional(),
+  /** Equation OCR (UniMERNet) LaTeX for kind='equation' figures (ADR 0001). */
+  extracted_latex: z.string().optional(),
 });
 
 export type FigureRef = z.infer<typeof FigureRefSchema>;
