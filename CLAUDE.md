@@ -143,23 +143,39 @@ Load on every session start (`/init`): `MEMORY.md`, `work-efficiency.md`,
 - For numeric tuning (timeout/retry/TTL/limit), require one measurement before
   shipping the bump.
 
-### 🌳 Worktree Collaboration Pattern
-- **Always use git worktrees for concurrent feature work** (isolated directories, no context switching).
-- **main branch is READ-ONLY**: never commit directly to main. All work → feature branch in a worktree.
-- **Worktree lifecycle**:
-  1. `/work` or `/init` auto-creates a new worktree for the current task
-  2. Feature work happens in isolation (separate `src/`, `py/`, dependencies)
-  3. Commit + push to feature branch
-  4. Create PR, get review, merge to main
-  5. `ExitWorktree --keep` to preserve work; `--remove` if abandoned
-- **Concurrent workflows**:
-  - You: worktree-A (feature/x) → PR pending review
-  - Collaborator: worktree-B (feature/y) → independent development
-  - Both pull origin/main frequently (`git fetch`) to stay current
-- **Conflict avoidance**:
-  - Different features → different worktrees (no contention on files)
-  - Same file edits → coordinate via PR review, not parallel worktrees
-  - Main stays clean → rebase feature branches on origin/main before PR
+### 🌳 Worktree Collaboration Pattern (MANDATORY — pre-work gate)
+- **ALL repo work happens in a dedicated worktree. NO EXCEPTION.** Working in
+  the main checkout (repo root) — even on a feature branch — is a VIOLATION.
+  The repo root stays parked on `main` (READ-ONLY), always clean.
+- **Pre-work gate — run BEFORE the first Write/Edit/commit of ANY repo change:**
+  1. `git worktree list` → confirm the working dir is `.claude/worktrees/<feature>`,
+     NOT the repo root. If at the repo root → STOP and create a worktree first.
+  2. Branch only off **fresh `origin/main`**: `git checkout main && git pull --ff-only`
+     BEFORE `EnterWorktree` / `git worktree add`. Never branch off a stale local branch.
+  3. Never commit directly to `main`.
+- **Pull-before-work (conflict prevention):**
+  - Session start: `git checkout main && git pull --ff-only origin main` so the
+    base is current before branching.
+  - During work: `git fetch origin` frequently; if `origin/main` moved,
+    `git rebase origin/main` (rebase, NOT merge — no merge commits in history).
+  - Before PR: rebase the feature branch on the latest `origin/main` so conflicts
+    surface locally, not in CI.
+- **Worktree lifecycle:**
+  1. `/work` or `/init` auto-creates a new worktree (off fresh main) for the task.
+  2. Feature work happens in isolation (separate `src/`, `py/`, dependencies).
+  3. Commit + push to the feature branch.
+  4. Create PR, get review, merge to main.
+  5. `ExitWorktree --keep` to preserve work; `--remove` if abandoned.
+  6. **After merge: delete the local feature branch AND remove its worktree.**
+     Stale branches/worktrees are a known confusion source — clean them every time.
+- **Conflict avoidance:**
+  - Different features → different worktrees (no contention on files).
+  - Same file / same lines → coordinate via Issue/PR before starting; one waits,
+    then rebases on the merged result.
+- **Anti-pattern (caused a 2026-06-01 incident):** editing files in the repo root
+  on a `feature/*` branch that was already merged and 11+ commits behind
+  `origin/main`. Local main was never pulled. Result: stale base + risk of
+  clobbering colleague fixes on the same files. The pre-work gate above blocks this.
 
 ---
 
