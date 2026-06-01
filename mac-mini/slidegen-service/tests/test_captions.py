@@ -86,13 +86,13 @@ def test_cosine_distance_orthogonal():
 
 
 def test_cosine_distance_identical():
-    """Identical vectors should have distance 0.0."""
+    """Identical vectors should have distance near 0.0."""
     from captions import _cosine_distance
 
     a = [1.0, 2.0, 3.0]
     b = [1.0, 2.0, 3.0]
     dist = _cosine_distance(a, b)
-    assert dist == 0.0
+    assert dist < 1e-10
 
 
 def test_cosine_distance_zero_vector():
