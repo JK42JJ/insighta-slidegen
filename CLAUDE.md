@@ -143,6 +143,24 @@ Load on every session start (`/init`): `MEMORY.md`, `work-efficiency.md`,
 - For numeric tuning (timeout/retry/TTL/limit), require one measurement before
   shipping the bump.
 
+### 🌳 Worktree Collaboration Pattern
+- **Always use git worktrees for concurrent feature work** (isolated directories, no context switching).
+- **main branch is READ-ONLY**: never commit directly to main. All work → feature branch in a worktree.
+- **Worktree lifecycle**:
+  1. `/work` or `/init` auto-creates a new worktree for the current task
+  2. Feature work happens in isolation (separate `src/`, `py/`, dependencies)
+  3. Commit + push to feature branch
+  4. Create PR, get review, merge to main
+  5. `ExitWorktree --keep` to preserve work; `--remove` if abandoned
+- **Concurrent workflows**:
+  - You: worktree-A (feature/x) → PR pending review
+  - Collaborator: worktree-B (feature/y) → independent development
+  - Both pull origin/main frequently (`git fetch`) to stay current
+- **Conflict avoidance**:
+  - Different features → different worktrees (no contention on files)
+  - Same file edits → coordinate via PR review, not parallel worktrees
+  - Main stays clean → rebase feature branches on origin/main before PR
+
 ---
 
 ## "Done" = verified
