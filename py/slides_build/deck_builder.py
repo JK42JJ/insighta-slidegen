@@ -27,10 +27,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
-
-from slides_build.manifest_io import load_manifest, manifest_path, SlideOutline
-from slides_build import auth, layouts
 
 
 def build_deck(deck_id: str) -> dict:
