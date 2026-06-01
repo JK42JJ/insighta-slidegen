@@ -102,7 +102,9 @@ def test_extract_section_frames_creates_jpegs(tmp_path):
         ]
 
         section = {"index": 0, "from_sec": 0, "to_sec": 3}
-        _extract_section_frames(tmp_path / "dummy.mp4", section, tmp_path)
+        # imwrite must be mocked too — the mock frames are not real numpy arrays.
+        with patch("acquire.cv2.imwrite"):
+            _extract_section_frames(tmp_path / "dummy.mp4", section, tmp_path)
 
         # Check that imwrite was called (mock doesn't actually write)
         # But we can verify the video was closed

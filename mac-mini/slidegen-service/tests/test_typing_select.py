@@ -55,9 +55,13 @@ def test_select_keyframes_stops_at_target():
 
     with patch("typing_select._encode_candidates") as mock_encode:
         with patch("typing_select._persist_keyframes"):
-            # All embeddings different (no duplicates)
+            # Distinct one-hot embeddings → mutually orthogonal (cosine distance
+            # 1.0 between any pair) so none are deduped and selection reaches the
+            # TARGET_SELECTED cap. A constant-valued vector would be collinear and
+            # get correctly deduped, leaving far fewer than TARGET_SELECTED.
             mock_encode.return_value = [
-                [float(i % 512) / 512] * 512 for i in range(len(candidates))
+                [1.0 if j == i else 0.0 for j in range(512)]
+                for i in range(len(candidates))
             ]
 
             result = select_keyframes(candidates, [])

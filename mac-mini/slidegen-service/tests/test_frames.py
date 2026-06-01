@@ -95,24 +95,27 @@ def test_laplacian_score_handles_none():
 
 def test_scene_boundaries_returns_timestamps():
     """_scene_boundaries should return list of float timestamps."""
+    import sys
+
     from frames import _scene_boundaries
 
-    with patch("frames.VideoManager") as mock_vm_class:
-        with patch("frames.SceneManager") as mock_sm_class:
-            mock_vm = MagicMock()
-            mock_sm = MagicMock()
-            mock_vm_class.return_value = mock_vm
-            mock_sm_class.return_value = mock_sm
+    # scenedetect is imported lazily inside _scene_boundaries, so it is not a
+    # module-level attribute of `frames`. Inject a fake scenedetect module so the
+    # `from scenedetect import ...` resolves to mocks regardless of the installed
+    # scenedetect version.
+    fake_scenedetect = MagicMock()
+    mock_scene_1 = (MagicMock(get_seconds=MagicMock(return_value=10.0)), MagicMock())
+    mock_scene_2 = (MagicMock(get_seconds=MagicMock(return_value=20.0)), MagicMock())
+    fake_scenedetect.SceneManager.return_value.get_scene_list.return_value = [
+        mock_scene_1,
+        mock_scene_2,
+    ]
 
-            # Mock scene list: [(timecode_1, timecode_2), ...]
-            mock_scene_1 = (MagicMock(get_seconds=MagicMock(return_value=10.0)), MagicMock())
-            mock_scene_2 = (MagicMock(get_seconds=MagicMock(return_value=20.0)), MagicMock())
-            mock_sm.get_scene_list.return_value = [mock_scene_1, mock_scene_2]
+    with patch.dict(sys.modules, {"scenedetect": fake_scenedetect}):
+        result = _scene_boundaries(Path("dummy.mp4"))
 
-            result = _scene_boundaries(Path("dummy.mp4"))
-
-            assert isinstance(result, list)
-            assert all(isinstance(t, float) for t in result)
+    assert isinstance(result, list)
+    assert all(isinstance(t, float) for t in result)
 
 
 def test_get_video_duration():

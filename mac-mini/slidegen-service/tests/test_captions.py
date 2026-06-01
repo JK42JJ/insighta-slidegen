@@ -109,7 +109,9 @@ def test_embed_texts_calls_http():
     """_embed_texts should POST to BGE_M3_EMBED_URL and return embeddings."""
     from captions import _embed_texts
 
-    with patch("captions.httpx.post") as mock_post:
+    # captions imports httpx lazily inside _embed_texts, so patch the real
+    # httpx module (captions has no module-level httpx attribute to patch).
+    with patch("httpx.post") as mock_post:
         mock_response = MagicMock()
         mock_response.json.return_value = {"embeddings": [[0.1, 0.2], [0.3, 0.4]]}
         mock_post.return_value = mock_response
