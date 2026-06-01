@@ -34,10 +34,10 @@ from typing import Any
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
-from acquire import download_frames  # noqa: F401
-from frames import extract_candidates  # noqa: F401
-from captions import detect_topic_changes  # noqa: F401
-from typing_select import select_keyframes  # noqa: F401
+from acquire import download_frames
+from frames import extract_candidates
+from captions import detect_topic_changes
+from typing_select import select_keyframes
 from figure_extract import extract_figures as cv_extract_figures  # noqa: F401
 from redraw import vector_redraw  # noqa: F401
 
@@ -170,17 +170,46 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
         95%  redraw.vector_redraw(figures)                  → 300 DPI vector output
         100% Done — write figures to _jobs[job_id]["figures"]
 
-    TODO: implement each step call and update progress.
     On exception: set status='error', error=str(e).
     """
     try:
         _jobs[job_id]["status"] = "running"
-        # step 1 — acquire
-        # step 2 — frames (katna ~80 candidates)
-        # step 3 — captions (bge-m3 topic-change points)
-        # step 4 — typing_select (clip + pgvector dedup → ~12)
+
+        # Step 1: acquire (15%) — download video + extract JPEG frames
+        sections = [s.model_dump() for s in req.sections]
+        frames_dir = download_frames(req.youtube_video_id, sections)
+        _jobs[job_id]["progress_pct"] = 15.0
+
+        # Step 2: frames (30%) — Katna ~80 candidate frames
+        video_path = frames_dir / "video.mp4"
+        candidates = extract_candidates(video_path)
+        _jobs[job_id]["progress_pct"] = 30.0
+
+        # Step 3: captions (45%) — BGE-M3 topic-change detection
+        topic_points = detect_topic_changes(req.youtube_video_id, req.mode)
+        _jobs[job_id]["progress_pct"] = 45.0
+
+        # Step 4: typing_select (65%) — CLIP + topic alignment → ~12 keyframes
+        # NOTE: return value (selected keyframes) will feed step 5 (figure_extract)
+        # once implemented; in prod mode select_keyframes also persists them.
+        select_keyframes(candidates, topic_points, req.mode)
+        _jobs[job_id]["progress_pct"] = 65.0
+
+        # Step 5-6: TODO (remaining stages)
         # step 5 — figure_extract (yolo/ocr on selected)
         # step 6 — redraw (vector 300dpi)
-        _jobs[job_id].update({"status": "done", "progress_pct": 100.0, "figures": [], "keyframe_count": 0})
+
+        # Placeholder output
+        _jobs[job_id].update({
+            "status": "done",
+            "progress_pct": 100.0,
+            "figures": [],
+            "keyframe_count": len(candidates),
+        })
+
     except Exception as exc:
-        _jobs[job_id].update({"status": "error", "error": str(exc), "progress_pct": 0.0})
+        _jobs[job_id].update({
+            "status": "error",
+            "error": str(exc),
+            "progress_pct": 0.0,
+        })

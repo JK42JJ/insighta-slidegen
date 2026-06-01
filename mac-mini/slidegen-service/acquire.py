@@ -18,7 +18,10 @@ Mode note: this module has no vision API calls; mode gate is irrelevant here.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+
+import cv2
 
 
 FRAME_RATE = 1  # frames per second extracted from video
@@ -40,9 +43,71 @@ def download_frames(
     Returns:
         Path to directory containing extracted JPEG frames,
         named <timestamp_sec>_<section_index>.jpg.
-
-    TODO: implement yt-dlp subprocess + opencv frame extraction loop.
     """
-    raise NotImplementedError(
-        f"TODO: download_frames youtube_video_id={youtube_video_id}"
-    )
+    frames_dir = Path(output_root) / youtube_video_id
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    # Step 1: Download video (cached if exists)
+    video_path = frames_dir / "video.mp4"
+    if not video_path.exists():
+        _download_video(youtube_video_id, video_path)
+
+    # Step 2: Extract frames for each section
+    for section in sections:
+        _extract_section_frames(video_path, section, frames_dir)
+
+    return frames_dir
+
+
+def _download_video(youtube_video_id: str, output_path: Path) -> None:
+    """Download video from YouTube using yt-dlp."""
+    url = f"https://www.youtube.com/watch?v={youtube_video_id}"
+    cmd = [
+        "yt-dlp",
+        "-f",
+        "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
+        "-o",
+        str(output_path),
+        "--no-playlist",
+        url,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f"yt-dlp failed: {result.stderr}")
+
+
+def _extract_section_frames(
+    video_path: Path, section: dict, frames_dir: Path
+) -> None:
+    """Extract frames from a video section using opencv."""
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to open video: {video_path}")
+
+    from_sec = section["from_sec"]
+    to_sec = section["to_sec"]
+    section_index = section["index"]
+
+    # Seek to start of section
+    cap.set(cv2.CAP_PROP_POS_MSEC, from_sec * 1000)
+
+    t = from_sec
+    while t < to_sec:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Get current timestamp (in seconds)
+        timestamp_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+        timestamp_sec = int(timestamp_ms / 1000)
+
+        # Write frame to JPEG
+        out_path = frames_dir / f"{timestamp_sec}_{section_index}.jpg"
+        cv2.imwrite(str(out_path), frame)
+
+        # Advance by FRAME_RATE seconds
+        next_ms = (t + FRAME_RATE) * 1000
+        cap.set(cv2.CAP_PROP_POS_MSEC, next_ms)
+        t += FRAME_RATE
+
+    cap.release()
