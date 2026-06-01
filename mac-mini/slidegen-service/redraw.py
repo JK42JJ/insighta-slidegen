@@ -12,8 +12,8 @@ Output: SVG + PDF (via matplotlib savefig with backend='pdf').
 For diagram figures: traces bitmap with potrace / Inkscape (subprocess call)
 to produce SVG. Falls back to high-DPI PNG if vectorisation fails.
 
-For equation figures: renders LaTeX string (from pix2tex) via matplotlib
-mathtext or a LaTeX subprocess → SVG.
+For equation figures: renders the LaTeX string (from UniMERNet — see ADR 0001)
+via matplotlib mathtext or a LaTeX subprocess → SVG.
 
 Entry: vector_redraw(figures) → list[RedrawnFigure]
 """

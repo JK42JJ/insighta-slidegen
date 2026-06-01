@@ -1,31 +1,30 @@
 """
-Keyframe selection by CLIP embedding distance + BGE-M3 caption topic alignment.
+Keyframe selection by a local vision-language model (Qwen2.5-VL) — ADR 0001.
+
+Replaces the former CLIP-embedding + cosine-dedup selector. A local VLM reads
+the Katna candidate frames in timestamp order and decides, per frame, whether it
+is a knowledge-bearing slide and what it contains (graph / equation / type),
+emitting routing metadata that drives the downstream conditional extraction
+(DocLayout-YOLO region crop / UniMERNet equation OCR).
 
 Inputs:
-    candidates  — ~80 FrameCandidate objects from frames.extract_candidates()
+    candidates   — ~50-100 FrameCandidate objects from frames.extract_candidates()
     topic_points — list[CaptionTopicPoint] from captions.detect_topic_changes()
+                   (BGE-M3 caption topic-change signal; auxiliary)
 
-Selection algorithm (greedy dedup, same logic as Insighta iks-scorer dedup):
-    1. Batch-encode all candidate frames with open_clip (CLIP ViT-B/32) → 512-dim vectors.
-    2. For each candidate in timestamp order:
-         a. Compute cosine distance vs every already-selected frame's CLIP vector.
-         b. If min_distance < CLIP_DISTANCE_THRESHOLD → semantically similar → skip.
-         c. If a caption topic-change point falls within ±TOPIC_ALIGN_WINDOW_SEC of
-            this frame AND the CLIP distance check passes → "definite keep".
-         d. Otherwise keep if CLIP distance check passes (visually new content).
-    3. Stop when selected count reaches TARGET_SELECTED or candidates exhausted.
-    4. Write each selected frame's clip_embedding to slide_keyframes via pgvector
-       (pgvector computes cosine distances; embeddings stored for later querying).
+Selection algorithm:
+    1. Batch the candidate frames to the local VLM (Qwen2.5-VL, MLX on Apple
+       Silicon; 3B fallback per ADR 0001 D9) with a prompt that forces the
+       routing JSON schema: is_slide / contains_graph / contains_equation /
+       frame_type / summary_hint / confidence.
+    2. Keep the frames the VLM marks is_slide=True, in timestamp order, up to
+       TARGET_SELECTED_MAX (~20). Target floor is TARGET_SELECTED_MIN (~12).
+    3. Mark caption topic-change alignment (auxiliary BGE-M3 signal).
+    4. In prod mode, persist selected rows to slidegen.slide_keyframes with the
+       routing metadata columns — NO clip_embedding (ADR 0001). Dev: no DB write.
 
-Result: ~12 SelectedFrame objects, each carrying timestamp_sec + clip_embedding.
-
-YOLO / layout detection / OCR are NOT here.  They run downstream in
-figure_extract.py on the already-selected ~12 frames.
-
-Constants:
-    CLIP_DISTANCE_THRESHOLD  — cosine distance below which frames are "too similar".
-    TOPIC_ALIGN_WINDOW_SEC   — seconds within which a topic change "locks in" a frame.
-    TARGET_SELECTED          — target number of final keyframes (~12).
+No CLIP. No vision API. The router VLM runs locally (ADR 0001 — LLM API ban
+upheld; this is an open-weights local model, not an API call).
 """
 
 from __future__ import annotations
@@ -34,36 +33,47 @@ from dataclasses import dataclass
 
 from frames import FrameCandidate
 
-# Cosine distance threshold: frames closer than this are considered duplicates.
-# Mirrors the similarity threshold used in Insighta's iks-scorer card dedup.
-CLIP_DISTANCE_THRESHOLD = 0.25
+# Local VLM router model (Apple Silicon / MLX). 3B is the memory fallback (ADR D9).
+ROUTER_MODEL = "qwen2.5-vl-7b-instruct"
 
-# A caption topic-change point within this window of a candidate frame locks it in.
+# A caption topic-change point within this window of a candidate "locks it in".
 TOPIC_ALIGN_WINDOW_SEC = 3.0
 
-# Final selected frame target — one keyframe per distinct topic.
-TARGET_SELECTED = 12
+# Final selected-frame target band (ADR 0001: 12-20 knowledge-bearing slides).
+TARGET_SELECTED_MIN = 12
+TARGET_SELECTED_MAX = 20
 
 
 @dataclass
 class CaptionTopicPoint:
     """A topic-change boundary detected in the caption stream (from captions.py)."""
     timestamp_sec: float
-    topic_label: str | None  # brief description of new topic; may be None
-    bge_embedding: list[float]  # 1024-dim BGE-M3 embedding of the topic-change segment
+    topic_label: str | None      # brief description of new topic; may be None
+    bge_embedding: list[float]   # 1024-dim BGE-M3 embedding of the topic-change segment
+
+
+@dataclass
+class RoutingMetadata:
+    """Per-frame routing decision emitted by the VLM router (ADR 0001 JSON schema)."""
+    is_slide: bool               # knowledge-bearing slide vs transition/b-roll
+    contains_graph: bool         # chart / diagram / table region present
+    contains_equation: bool      # mathematical equation present
+    frame_type: str              # "title_card"|"diagram"|"chart"|"table"|"face"|"b_roll"
+    summary_hint: str | None     # brief description of the slide content
+    confidence: float            # VLM confidence for this routing decision (0.0-1.0)
 
 
 @dataclass
 class SelectedFrame:
-    """A candidate that survived embedding-distance dedup and is a final keyframe."""
+    """A candidate the VLM router kept as a final keyframe, carrying routing metadata."""
     candidate: FrameCandidate
-    clip_embedding: list[float]          # 512-dim CLIP vector
-    is_topic_aligned: bool               # True if locked in by a caption topic-change point
-    nearest_topic_point: CaptionTopicPoint | None  # topic-change point that aligned this frame
-    cosine_distance_to_prev: float | None  # distance to the nearest already-selected frame
-    # frame_type / quality are available as tie-break notes only (no longer the selector)
-    frame_type: str = "unknown"          # "title_card" | "diagram" | "chart" | "face" | "b_roll"
-    type_confidence: float = 0.0
+    contains_graph: bool
+    contains_equation: bool
+    frame_type: str
+    summary_hint: str | None
+    is_topic_aligned: bool                          # locked in by a caption topic-change point
+    nearest_topic_point: CaptionTopicPoint | None   # the aligning topic-change point, if any
+    selection_score: float                          # VLM confidence for this frame
 
 
 def select_keyframes(
@@ -72,138 +82,75 @@ def select_keyframes(
     mode: str = "dev",
 ) -> list[SelectedFrame]:
     """
-    Select ~TARGET_SELECTED keyframes from ~80 candidates via CLIP + topic alignment.
+    Select 12-20 keyframes from the candidates via the local VLM router.
 
-    Algorithm:
-        1. Batch-encode candidates with open_clip.encode_image() → 512-dim vectors.
-        2. Iterate candidates in timestamp order:
-             a. Query pgvector for cosine distance to all already-selected embeddings.
-                  (pgvector: SELECT 1 - (embedding <=> query) FROM slide_keyframes ...)
-             b. If min cosine distance < CLIP_DISTANCE_THRESHOLD → skip (duplicate).
-             c. Else: check caption topic_points within TOPIC_ALIGN_WINDOW_SEC.
-                  topic-aligned AND visually new → definite keep (is_topic_aligned=True).
-                  visually new only → keep.
-             d. Persist is_selected=True row to slide_keyframes with clip_embedding.
-        3. Stop at TARGET_SELECTED or end of candidates.
-        4. Return SelectedFrame list (timestamp_sec ascending).
-
-    In dev mode: no DB write; skip pgvector queries; use in-memory cosine calc.
-    In prod mode: write to slide_keyframes + use pgvector for distance computation.
+    Returns SelectedFrame list sorted by timestamp_sec ascending. In dev mode no
+    DB write happens; in prod mode the selected rows are persisted to
+    slidegen.slide_keyframes (routing metadata; no CLIP embedding — ADR 0001).
     """
     if not candidates:
         return []
 
-    # Step 1: Batch-encode all candidates with CLIP
-    clip_embeddings = _encode_candidates(candidates)
-    if not clip_embeddings:
+    # Step 1: VLM routing decision per candidate (same order as candidates).
+    routings = _route_with_vlm(candidates)
+    if not routings:
         return []
 
-    # Step 2: Greedy dedup — iterate in timestamp order
+    # Step 2: keep is_slide frames in timestamp order, capped at the target max.
     selected: list[SelectedFrame] = []
-    for i, candidate in enumerate(candidates):
-        clip_vec = clip_embeddings[i]
-
-        # Compute min cosine distance to already-selected frames (dev: in-memory)
-        min_distance = _min_cosine_distance_to_selected(clip_vec, selected)
-
-        # Skip if semantically similar to an already-selected frame
-        if min_distance < CLIP_DISTANCE_THRESHOLD:
+    for candidate, routing in zip(candidates, routings):
+        if not routing.is_slide:
             continue
 
-        # Check for topic-change alignment
+        # Step 3: caption topic-change alignment (auxiliary signal).
         nearest_topic, is_aligned = _find_topic_alignment(candidate, topic_points)
 
-        # Create SelectedFrame
-        selected_frame = SelectedFrame(
-            candidate=candidate,
-            clip_embedding=clip_vec,
-            is_topic_aligned=is_aligned,
-            nearest_topic_point=nearest_topic,
-            cosine_distance_to_prev=min_distance if selected else None,
+        selected.append(
+            SelectedFrame(
+                candidate=candidate,
+                contains_graph=routing.contains_graph,
+                contains_equation=routing.contains_equation,
+                frame_type=routing.frame_type,
+                summary_hint=routing.summary_hint,
+                is_topic_aligned=is_aligned,
+                nearest_topic_point=nearest_topic,
+                selection_score=routing.confidence,
+            )
         )
-        selected.append(selected_frame)
 
-        # Stop when target reached
-        if len(selected) >= TARGET_SELECTED:
+        if len(selected) >= TARGET_SELECTED_MAX:
             break
 
-    # Step 3: Persist to slide_keyframes (prod only)
+    # Step 4: persist (prod only).
     if mode != "dev":
         _persist_keyframes(selected)
 
-    # Step 4: Return sorted by timestamp
     return sorted(selected, key=lambda s: s.candidate.timestamp_sec)
 
 
-def _encode_candidates(candidates: list[FrameCandidate]) -> list[list[float]]:
-    """Batch-encode candidates with CLIP ViT-B/32."""
-    try:
-        import open_clip
-        import torch
-        from PIL import Image
-    except ImportError as e:
-        raise ImportError(
-            "open_clip, torch and Pillow required. "
-            "Install with: pip install open-clip-torch torch pillow"
-        ) from e
+def _route_with_vlm(candidates: list[FrameCandidate]) -> list[RoutingMetadata]:
+    """
+    Run the local VLM router (Qwen2.5-VL) over the candidate frames.
 
-    try:
-        model, _, preprocess = open_clip.create_model_and_transforms("ViT-B-32", pretrained="openai")
-    except Exception as e:
-        raise RuntimeError(f"Failed to load CLIP model: {e}") from e
+    Phase 2 inference stub (ADR 0001). Implementation plan:
+        1. Lazy-import the MLX VLM runtime (mlx_vlm on Apple Silicon; 3B fallback
+           per ADR D9 when the 7B-4bit footprint is unsafe alongside the
+           extractors).
+        2. Load ROUTER_MODEL once (module-level cache).
+        3. Prompt the model (batched, timestamp-ordered) with the routing JSON
+           schema and parse exactly one RoutingMetadata per input candidate.
 
-    embeddings = []
-    for candidate in candidates:
-        try:
-            img = Image.open(candidate.path)
-            img_tensor = preprocess(img).unsqueeze(0)
-            # Image encoding only — no tokenizer is needed (that is for text).
-            with torch.no_grad():
-                emb = model.encode_image(img_tensor)
-                emb_normalized = emb / emb.norm(dim=-1, keepdim=True)
-                embeddings.append(emb_normalized.squeeze(0).tolist())
-        except Exception:
-            # If encoding fails, use zero vector as fallback
-            embeddings.append([0.0] * 512)
-
-    return embeddings
-
-
-def _min_cosine_distance_to_selected(clip_vec: list[float], selected: list[SelectedFrame]) -> float:
-    """Compute minimum cosine distance from clip_vec to all selected frames."""
-    if not selected:
-        return 1.0
-
-    min_dist = 1.0
-    for selected_frame in selected:
-        dist = _cosine_distance(clip_vec, selected_frame.clip_embedding)
-        min_dist = min(min_dist, dist)
-
-    return min_dist
-
-
-def _cosine_distance(a: list[float], b: list[float]) -> float:
-    """Compute cosine distance (1 - cosine similarity) between two vectors."""
-    import math
-
-    if not a or not b or len(a) != len(b):
-        return 1.0
-
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-
-    if norm_a == 0 or norm_b == 0:
-        return 1.0
-
-    cosine_sim = dot / (norm_a * norm_b)
-    return 1.0 - cosine_sim
+    Returns one RoutingMetadata per input candidate, in the same order.
+    """
+    raise NotImplementedError(
+        "TODO (Phase 2 inference): load Qwen2.5-VL via mlx_vlm and emit routing metadata"
+    )
 
 
 def _find_topic_alignment(
     candidate: FrameCandidate, topic_points: list[CaptionTopicPoint]
 ) -> tuple[CaptionTopicPoint | None, bool]:
-    """Find topic-change point within TOPIC_ALIGN_WINDOW_SEC of candidate."""
+    """Find a caption topic-change point within TOPIC_ALIGN_WINDOW_SEC of candidate."""
     for topic_point in topic_points:
         if abs(candidate.timestamp_sec - topic_point.timestamp_sec) <= TOPIC_ALIGN_WINDOW_SEC:
             return topic_point, True
@@ -212,42 +159,16 @@ def _find_topic_alignment(
 
 
 def _persist_keyframes(selected: list[SelectedFrame]) -> None:
-    """Persist selected frames to slide_keyframes (prod only)."""
-    import json
-    import os
+    """
+    Persist selected frames to slidegen.slide_keyframes (prod only).
 
-    db_url = os.environ.get("DATABASE_URL", "")
-    if not db_url:
-        return
+    Writes the routing-metadata columns (frame_type, selection_score,
+    contains_graph, contains_equation, summary_hint, is_selected) — NO
+    clip_embedding (deprecated, ADR 0001).
 
-    try:
-        import psycopg2
-    except ImportError:
-        return
-
-    try:
-        conn = psycopg2.connect(db_url)
-        cur = conn.cursor()
-
-        for selected_frame in selected:
-            candidate = selected_frame.candidate
-            embedding_json = json.dumps(selected_frame.clip_embedding)
-
-            cur.execute(
-                """INSERT INTO slide_keyframes
-                   (timestamp_sec, clip_embedding, is_topic_aligned, is_selected)
-                   VALUES (%s, %s, %s, %s)
-                   ON CONFLICT DO NOTHING""",
-                (
-                    candidate.timestamp_sec,
-                    embedding_json,
-                    selected_frame.is_topic_aligned,
-                    True,
-                ),
-            )
-
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception:
-        pass
+    Phase 2 prod stub: wire the psycopg2 INSERT (with youtube_video_id +
+    section_index) when the prod write path is implemented.
+    """
+    raise NotImplementedError(
+        "TODO (Phase 2 prod): INSERT routing metadata into slidegen.slide_keyframes"
+    )
