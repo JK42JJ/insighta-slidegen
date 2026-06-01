@@ -34,9 +34,9 @@ from typing import Any
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
-from acquire import download_frames  # noqa: F401
-from frames import extract_candidates  # noqa: F401
-from captions import detect_topic_changes  # noqa: F401
+from acquire import download_frames
+from frames import extract_candidates
+from captions import detect_topic_changes
 from typing_select import select_keyframes  # noqa: F401
 from figure_extract import extract_figures as cv_extract_figures  # noqa: F401
 from redraw import vector_redraw  # noqa: F401
@@ -185,8 +185,11 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
         candidates = extract_candidates(video_path)
         _jobs[job_id]["progress_pct"] = 30.0
 
-        # Step 3-6: TODO (remaining stages)
-        # step 3 — captions (bge-m3 topic-change points)
+        # Step 3: captions (45%) — BGE-M3 topic-change detection
+        topic_points = detect_topic_changes(req.youtube_video_id, req.mode)
+        _jobs[job_id]["progress_pct"] = 45.0
+
+        # Step 4-6: TODO (remaining stages)
         # step 4 — typing_select (clip + pgvector dedup → ~12)
         # step 5 — figure_extract (yolo/ocr on selected)
         # step 6 — redraw (vector 300dpi)

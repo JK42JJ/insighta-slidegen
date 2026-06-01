@@ -69,10 +69,174 @@ def detect_topic_changes(
         7. Return list of CaptionTopicPoint sorted by timestamp_sec.
 
     In dev mode: DB write skipped; BGE_M3_EMBED_URL may be a local stub.
-
-    TODO: implement using httpx (async POST to BGE_M3_EMBED_URL) + Prisma/psycopg2
-          for video_captions read + slide_caption_segments write.
     """
-    raise NotImplementedError(
-        f"TODO: detect_topic_changes youtube_video_id={youtube_video_id}"
-    )
+    segments = _load_caption_segments(youtube_video_id)
+    if not segments:
+        return []
+
+    # Filter by minimum duration
+    segments = [s for s in segments if (s.to_sec - s.from_sec) >= MIN_SEGMENT_SEC]
+    if not segments:
+        return []
+
+    # Embed all segment texts
+    texts = [s.text for s in segments]
+    embeddings = _embed_texts(texts)
+
+    # Assign embeddings to segments
+    for seg, emb in zip(segments, embeddings):
+        seg.bge_embedding = emb
+
+    # Detect topic changes
+    topic_points = _detect_changes(segments)
+
+    # Persist to slide_caption_segments (prod only)
+    if mode != "dev":
+        _persist_segments(youtube_video_id, segments, topic_points)
+
+    return sorted(topic_points, key=lambda p: p.timestamp_sec)
+
+
+def _load_caption_segments(youtube_video_id: str) -> list[CaptionSegment]:
+    """Load caption segments from video_captions table."""
+    import json
+    import os
+
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return []
+
+    try:
+        import psycopg2
+    except ImportError:
+        return []
+
+    try:
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT segments FROM video_captions WHERE youtube_video_id = %s LIMIT 1",
+            (youtube_video_id,),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not row:
+            return []
+
+        raw = row[0]
+        if isinstance(raw, str):
+            parsed = json.loads(raw)
+        else:
+            parsed = raw
+
+        return [
+            CaptionSegment(
+                from_sec=s["from_sec"],
+                to_sec=s["to_sec"],
+                text=s["text"],
+                bge_embedding=[],
+            )
+            for s in parsed
+        ]
+    except Exception:
+        return []
+
+
+def _embed_texts(texts: list[str]) -> list[list[float]]:
+    """Batch-embed texts via BGE_M3_EMBED_URL HTTP endpoint."""
+    try:
+        import httpx
+    except ImportError:
+        raise ImportError("httpx not installed. Install with: pip install httpx")
+
+    if not texts:
+        return []
+
+    try:
+        response = httpx.post(
+            BGE_M3_EMBED_URL,
+            json={"texts": texts},
+            timeout=60.0,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("embeddings", [])
+    except Exception as e:
+        raise RuntimeError(f"BGE-M3 embedding failed: {e}") from e
+
+
+def _cosine_distance(a: list[float], b: list[float]) -> float:
+    """Compute cosine distance (1 - cosine similarity) between two vectors."""
+    import math
+
+    if not a or not b or len(a) != len(b):
+        return 1.0
+
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+
+    if norm_a == 0 or norm_b == 0:
+        return 1.0
+
+    cosine_sim = dot / (norm_a * norm_b)
+    return 1.0 - cosine_sim
+
+
+def _detect_changes(segments: list[CaptionSegment]) -> list[CaptionTopicPoint]:
+    """Detect topic-change boundaries via cosine distance."""
+    points = []
+    for i in range(1, len(segments)):
+        prev = segments[i - 1]
+        curr = segments[i]
+        dist = _cosine_distance(prev.bge_embedding, curr.bge_embedding)
+        if dist > TOPIC_CHANGE_DISTANCE_THRESHOLD:
+            points.append(
+                CaptionTopicPoint(
+                    timestamp_sec=curr.from_sec,
+                    topic_label=curr.text[:60] if curr.text else None,
+                    bge_embedding=curr.bge_embedding,
+                )
+            )
+    return points
+
+
+def _persist_segments(
+    youtube_video_id: str, segments: list[CaptionSegment], topic_points: list[CaptionTopicPoint]
+) -> None:
+    """Persist segments and topic changes to slide_caption_segments."""
+    import json
+    import os
+
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return
+
+    try:
+        import psycopg2
+    except ImportError:
+        return
+
+    try:
+        topic_timestamps = {p.timestamp_sec for p in topic_points}
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+
+        for seg in segments:
+            is_boundary = seg.from_sec in topic_timestamps
+            embedding_json = json.dumps(seg.bge_embedding)
+            cur.execute(
+                """INSERT INTO slide_caption_segments
+                   (youtube_video_id, from_sec, to_sec, text, bge_embedding, is_topic_change)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT DO NOTHING""",
+                (youtube_video_id, seg.from_sec, seg.to_sec, seg.text, embedding_json, is_boundary),
+            )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
