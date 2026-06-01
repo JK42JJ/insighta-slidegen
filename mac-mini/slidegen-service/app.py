@@ -190,7 +190,9 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
         _jobs[job_id]["progress_pct"] = 45.0
 
         # Step 4: typing_select (65%) — CLIP + topic alignment → ~12 keyframes
-        selected_frames = select_keyframes(candidates, topic_points, req.mode)
+        # NOTE: return value (selected keyframes) will feed step 5 (figure_extract)
+        # once implemented; in prod mode select_keyframes also persists them.
+        select_keyframes(candidates, topic_points, req.mode)
         _jobs[job_id]["progress_pct"] = 65.0
 
         # Step 5-6: TODO (remaining stages)

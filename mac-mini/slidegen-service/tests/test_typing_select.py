@@ -1,7 +1,7 @@
 """Unit tests for typing_select.py (keyframe selection via CLIP + topic alignment)."""
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 
 def test_selected_frame_dataclass():
@@ -101,7 +101,7 @@ def test_min_cosine_distance_to_selected_empty():
 def test_find_topic_alignment_within_window():
     """Topic point within TOPIC_ALIGN_WINDOW_SEC should align."""
     from frames import FrameCandidate
-    from typing_select import CaptionTopicPoint, _find_topic_alignment, TOPIC_ALIGN_WINDOW_SEC
+    from typing_select import CaptionTopicPoint, _find_topic_alignment
 
     candidate = FrameCandidate(Path("/tmp/frame.jpg"), 10.0, 0, 0.8, False)
     topic = CaptionTopicPoint(10.5, "Topic", [0.1] * 1024)  # Within window
@@ -115,7 +115,7 @@ def test_find_topic_alignment_within_window():
 def test_find_topic_alignment_outside_window():
     """Topic point outside TOPIC_ALIGN_WINDOW_SEC should not align."""
     from frames import FrameCandidate
-    from typing_select import CaptionTopicPoint, _find_topic_alignment, TOPIC_ALIGN_WINDOW_SEC
+    from typing_select import CaptionTopicPoint, _find_topic_alignment
 
     candidate = FrameCandidate(Path("/tmp/frame.jpg"), 10.0, 0, 0.8, False)
     topic = CaptionTopicPoint(20.0, "Topic", [0.1] * 1024)  # Outside window (>3s away)

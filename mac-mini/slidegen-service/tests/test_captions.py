@@ -1,6 +1,5 @@
 """Unit tests for captions.py (caption loading and topic-change detection)."""
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
@@ -41,7 +40,7 @@ def test_detect_topic_changes_returns_list():
     from captions import detect_topic_changes
 
     with patch("captions._load_caption_segments") as mock_load:
-        with patch("captions._embed_texts") as mock_embed:
+        with patch("captions._embed_texts"):
             with patch("captions._persist_segments"):
                 mock_load.return_value = []
                 result = detect_topic_changes("test_video_id")
@@ -138,7 +137,7 @@ def test_short_segments_filtered():
                 mock_load.return_value = [long_seg, short_seg]
                 mock_embed.return_value = [[1.0] * 1024, [0.5] * 1024]
 
-                result = detect_topic_changes("test_video_id")
+                detect_topic_changes("test_video_id")
 
                 # short_seg should be filtered, so embed_texts should receive 1 text
                 mock_embed.assert_called_once_with(["Long"])

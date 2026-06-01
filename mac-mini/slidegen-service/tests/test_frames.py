@@ -106,10 +106,8 @@ def test_scene_boundaries_returns_timestamps():
     fake_scenedetect = MagicMock()
     mock_scene_1 = (MagicMock(get_seconds=MagicMock(return_value=10.0)), MagicMock())
     mock_scene_2 = (MagicMock(get_seconds=MagicMock(return_value=20.0)), MagicMock())
-    fake_scenedetect.SceneManager.return_value.get_scene_list.return_value = [
-        mock_scene_1,
-        mock_scene_2,
-    ]
+    # _scene_boundaries uses the 0.6+ high-level detect() API.
+    fake_scenedetect.detect.return_value = [mock_scene_1, mock_scene_2]
 
     with patch.dict(sys.modules, {"scenedetect": fake_scenedetect}):
         result = _scene_boundaries(Path("dummy.mp4"))

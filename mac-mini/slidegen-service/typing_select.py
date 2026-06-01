@@ -139,9 +139,13 @@ def _encode_candidates(candidates: list[FrameCandidate]) -> list[list[float]]:
     """Batch-encode candidates with CLIP ViT-B/32."""
     try:
         import open_clip
+        import torch
         from PIL import Image
     except ImportError as e:
-        raise ImportError("open_clip and Pillow required. Install with: pip install open-clip-torch pillow") from e
+        raise ImportError(
+            "open_clip, torch and Pillow required. "
+            "Install with: pip install open-clip-torch torch pillow"
+        ) from e
 
     try:
         model, _, preprocess = open_clip.create_model_and_transforms("ViT-B-32", pretrained="openai")
@@ -153,11 +157,11 @@ def _encode_candidates(candidates: list[FrameCandidate]) -> list[list[float]]:
         try:
             img = Image.open(candidate.path)
             img_tensor = preprocess(img).unsqueeze(0)
-            with open_clip.get_tokenizer("ViT-B-32").__call__ as tokenizer:
-                with __import__("torch").no_grad():
-                    emb = model.encode_image(img_tensor)
-                    emb_normalized = emb / emb.norm(dim=-1, keepdim=True)
-                    embeddings.append(emb_normalized.squeeze(0).tolist())
+            # Image encoding only — no tokenizer is needed (that is for text).
+            with torch.no_grad():
+                emb = model.encode_image(img_tensor)
+                emb_normalized = emb / emb.norm(dim=-1, keepdim=True)
+                embeddings.append(emb_normalized.squeeze(0).tolist())
         except Exception:
             # If encoding fails, use zero vector as fallback
             embeddings.append([0.0] * 512)

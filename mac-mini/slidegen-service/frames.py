@@ -144,23 +144,17 @@ def _run_katna(video_path: Path, target_count: int) -> list[Path]:
 def _scene_boundaries(video_path: Path) -> list[float]:
     """Detect scene boundaries using PySceneDetect. Returns list of timestamps (sec)."""
     try:
-        from scenedetect import ContentDetector, SceneManager, VideoManager
+        # PySceneDetect 0.6+ high-level API. The legacy VideoManager/SceneManager
+        # boilerplate was removed; detect() wraps open_video + SceneManager.
+        from scenedetect import ContentDetector, detect
     except ImportError:
         # If scenedetect not available, return empty list (no reinforcement)
         return []
 
     try:
-        vm = VideoManager([str(video_path)])
-        sm = SceneManager()
-        sm.add_detector(ContentDetector())
-        vm.start()
-        sm.detect_scenes(frame_source=vm)
-        scenes = sm.get_scene_list(base_timecode=vm.get_base_timecode())
-        vm.release()
-
-        # Extract start timestamp of each scene
-        boundaries = [scene[0].get_seconds() for scene in scenes]
-        return boundaries
+        scene_list = detect(str(video_path), ContentDetector())
+        # Each scene is a (start, end) timecode pair; take each scene's start.
+        return [scene[0].get_seconds() for scene in scene_list]
     except Exception:
         # On any error, return empty list (no reinforcement, but don't fail)
         return []
