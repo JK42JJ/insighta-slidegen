@@ -18,7 +18,12 @@
 
 ## 1. Component Diagram
 
-> **DRAFT:** The CV frame-selection stage (Katna → CLIP → BGE-M3 → pgvector dedup → ~12) is an initial hypothesis pending research-driven finalization. See PRD §5.2.
+> **DRAFT — superseded by [ADR 0001](../adr/0001-pipeline-v1-frame-selection-and-extraction.md).**
+> The CLIP + BGE-M3 + pgvector-dedup hypothesis below is replaced for v1 by a
+> local VLM router (Qwen2.5-VL) + conditional DocLayout-YOLO / UniMERNet
+> extraction (synthesis stays in the Claude Code console; Google Slides + vector
+> PDF output unchanged). The diagram below is retained for historical context;
+> see ADR 0001 for the accepted v1 design. (Original DRAFT ref: PRD §5.2.)
 
 ```mermaid
 graph TD
