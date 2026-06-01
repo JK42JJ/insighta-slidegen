@@ -18,6 +18,11 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Opt into the Node.js 24 action runtime ahead of the 2026-06-16 forced switch,
+# silencing the Node 20 deprecation warnings on checkout/setup-node/setup-python.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   # ── TypeScript ──────────────────────────────────────────────────────────────
   typecheck:

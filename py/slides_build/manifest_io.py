@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
 
 from pydantic import BaseModel, field_validator
 
@@ -24,21 +23,21 @@ class FigureRef(BaseModel):
     cv_figure_id: str
     kind: str
     png_url: str
-    vector_pdf_url: Optional[str] = None
-    vector_svg_url: Optional[str] = None
-    caption: Optional[str] = None
-    timestamp_sec: Optional[int] = None
-    atom_refs: Optional[list[int]] = None
-    extraction_conf: Optional[float] = None
+    vector_pdf_url: str | None = None
+    vector_svg_url: str | None = None
+    caption: str | None = None
+    timestamp_sec: int | None = None
+    atom_refs: list[int] | None = None
+    extraction_conf: float | None = None
 
 
 class Slide(BaseModel):
     position: int
     layout: str
-    title: Optional[str] = None
-    body_json: Optional[dict] = None
-    notes: Optional[str] = None
-    section_ref: Optional[int] = None
+    title: str | None = None
+    body_json: dict | None = None
+    notes: str | None = None
+    section_ref: int | None = None
     figures: list[FigureRef] = []
 
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-
 SCOPES = [
     "https://www.googleapis.com/auth/presentations",
     "https://www.googleapis.com/auth/drive.file",
@@ -43,7 +42,7 @@ def get_credentials():
     client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
     client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
     if not client_id or not client_secret:
-        raise EnvironmentError("GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET not set")
+        raise OSError("GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET not set")
     # TODO: implement OAuth2 flow
     raise NotImplementedError("TODO: get_credentials — InstalledAppFlow or token refresh")
 

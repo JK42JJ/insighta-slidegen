@@ -27,9 +27,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
-
-from slides_build.manifest_io import load_manifest, manifest_path, SlideOutline
 
 
 def compose_pdf(deck_id: str, vector: bool = True) -> dict:
