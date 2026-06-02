@@ -134,6 +134,43 @@ def test_get_video_duration():
         assert duration == 10.0  # 300 frames / 30 fps = 10 seconds
 
 
+def test_run_katna_returns_persistent_paths():
+    """Regression: returned frame paths must survive _run_katna's internal
+    TemporaryDirectory cleanup (previously returned dangling paths inside a
+    deleted dir → cv2.imread None → silent quality_score 0.0)."""
+    import sys
+    from types import SimpleNamespace
+
+    class FakeWriter:
+        def __init__(self, location):
+            self.location = location
+
+    class FakeVideo:
+        def extract_video_keyframes(self, no_of_frames, file_path, writer):
+            # Katna writes frames into the writer's scratch location.
+            (Path(writer.location) / "keyframe_000000001.jpg").write_bytes(b"x")
+
+    fake_video_mod = SimpleNamespace(Video=FakeVideo)
+    fake_writer_mod = SimpleNamespace(KeyFrameDiskWriter=FakeWriter)
+
+    with patch.dict(
+        sys.modules,
+        {"katna.video": fake_video_mod, "katna.writer": fake_writer_mod},
+    ):
+        from frames import _run_katna
+
+        paths = _run_katna(Path("dummy.mp4"), 1)
+
+    assert len(paths) == 1
+    assert paths[0].exists()  # not dangling
+    assert paths[0].read_bytes() == b"x"
+
+    # cleanup the persistent dir this test produced
+    import shutil
+
+    shutil.rmtree(paths[0].parent, ignore_errors=True)
+
+
 def test_extract_timestamp_from_filename():
     """_extract_timestamp should parse numeric timestamp from filename."""
     from frames import _extract_timestamp
