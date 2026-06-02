@@ -13,10 +13,11 @@ Inputs:
                    (BGE-M3 caption topic-change signal; auxiliary)
 
 Selection algorithm:
-    1. Batch the candidate frames to the local VLM (Qwen2.5-VL, MLX on Apple
-       Silicon; 3B fallback per ADR 0001 D9) with a prompt that forces the
-       routing JSON schema: is_slide / contains_graph / contains_equation /
-       frame_type / summary_hint / confidence.
+    1. Batch the candidate frames to the local VLM router (Qwen2.5-VL) via the
+       pluggable `vlm_router` backend (mock / transformers / mlx, selected by
+       SLIDEGEN_VLM_BACKEND — so this runs off Apple Silicon too). The prompt
+       forces the routing JSON schema: is_slide / contains_graph /
+       contains_equation / frame_type / summary_hint / confidence.
     2. Keep the frames the VLM marks is_slide=True, in timestamp order, up to
        TARGET_SELECTED_MAX (~20). Target floor is TARGET_SELECTED_MIN (~12).
     3. Mark caption topic-change alignment (auxiliary BGE-M3 signal).
@@ -32,9 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from frames import FrameCandidate
-
-# Local VLM router model (Apple Silicon / MLX). 3B is the memory fallback (ADR D9).
-ROUTER_MODEL = "qwen2.5-vl-7b-instruct"
+from vlm_router import route_frames
 
 # A caption topic-change point within this window of a candidate "locks it in".
 TOPIC_ALIGN_WINDOW_SEC = 3.0
@@ -132,19 +131,24 @@ def _route_with_vlm(candidates: list[FrameCandidate]) -> list[RoutingMetadata]:
     """
     Run the local VLM router (Qwen2.5-VL) over the candidate frames.
 
-    Phase 2 inference stub (ADR 0001). Implementation plan:
-        1. Lazy-import the MLX VLM runtime (mlx_vlm on Apple Silicon; 3B fallback
-           per ADR D9 when the 7B-4bit footprint is unsafe alongside the
-           extractors).
-        2. Load ROUTER_MODEL once (module-level cache).
-        3. Prompt the model (batched, timestamp-ordered) with the routing JSON
-           schema and parse exactly one RoutingMetadata per input candidate.
+    Delegates inference to the configured `vlm_router` backend (mock by default;
+    transformers on CUDA/Kaggle; mlx on Apple Silicon — selected by
+    SLIDEGEN_VLM_BACKEND). The backend returns one routing dict per candidate in
+    input order, which is mapped 1:1 onto RoutingMetadata.
 
     Returns one RoutingMetadata per input candidate, in the same order.
     """
-    raise NotImplementedError(
-        "TODO (Phase 2 inference): load Qwen2.5-VL via mlx_vlm and emit routing metadata"
-    )
+    return [
+        RoutingMetadata(
+            is_slide=routing["is_slide"],
+            contains_graph=routing["contains_graph"],
+            contains_equation=routing["contains_equation"],
+            frame_type=routing["frame_type"],
+            summary_hint=routing["summary_hint"],
+            confidence=routing["confidence"],
+        )
+        for routing in route_frames(candidates)
+    ]
 
 
 def _find_topic_alignment(

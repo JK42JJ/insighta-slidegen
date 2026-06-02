@@ -14,6 +14,7 @@ Entry function: extract_candidates(video_path, target_count) → list[FrameCandi
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,7 +115,15 @@ def _get_video_duration(video_path: Path) -> float:
 
 
 def _run_katna(video_path: Path, target_count: int) -> list[Path]:
-    """Run Katna to extract keyframes. Returns list of frame paths."""
+    """Run Katna to extract keyframes. Returns list of persistent frame paths.
+
+    Katna writes into a scratch directory; we copy the frames into a persistent
+    temp dir BEFORE that scratch dir is cleaned up. Returning paths from inside
+    the `with tempfile.TemporaryDirectory()` block yields dangling paths once the
+    directory is deleted on function return (the caller would read missing files
+    → cv2.imread None → quality_score 0.0, silently). The caller owns cleanup of
+    the returned directory.
+    """
     try:
         from katna.video import Video
         from katna.writer import KeyFrameDiskWriter
@@ -123,6 +132,7 @@ def _run_katna(video_path: Path, target_count: int) -> list[Path]:
             "katna not installed. Install with: pip install katna"
         ) from e
 
+    out_dir = Path(tempfile.mkdtemp(prefix="slidegen_katna_"))
     with tempfile.TemporaryDirectory() as tmpdir:
         writer = KeyFrameDiskWriter(location=tmpdir)
         vd = Video()
@@ -136,9 +146,13 @@ def _run_katna(video_path: Path, target_count: int) -> list[Path]:
         except Exception as e:
             raise RuntimeError(f"Katna extraction failed: {e}") from e
 
-        # Collect extracted frames
-        frames = sorted(Path(tmpdir).glob("*.jpg"))
-        return frames
+        # Copy extracted frames out of the scratch dir before it is deleted.
+        persisted: list[Path] = []
+        for src in sorted(Path(tmpdir).glob("*.jpg")):
+            dst = out_dir / src.name
+            shutil.copyfile(src, dst)
+            persisted.append(dst)
+        return persisted
 
 
 def _scene_boundaries(video_path: Path) -> list[float]:
