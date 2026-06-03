@@ -29,39 +29,164 @@ def test_extract_candidates_returns_list():
     with patch("frames._run_katna") as mock_katna:
         with patch("frames._get_video_duration") as mock_duration:
             with patch("frames._scene_boundaries") as mock_boundaries:
-                mock_katna.return_value = [Path("/tmp/frame1.jpg")]
-                mock_duration.return_value = 100.0
-                mock_boundaries.return_value = []
+                with patch("frames._recover_timestamps") as mock_recover:
+                    frame = Path("/tmp/frame1.jpg")
+                    mock_katna.return_value = [frame]
+                    mock_duration.return_value = 100.0
+                    mock_boundaries.return_value = []
+                    mock_recover.return_value = {frame: 12.0}
 
-                result = extract_candidates(Path("dummy.mp4"))
+                    result = extract_candidates(Path("dummy.mp4"))
 
-                assert isinstance(result, list)
-                if len(result) > 0:
-                    from frames import FrameCandidate
-                    assert isinstance(result[0], FrameCandidate)
+                    assert isinstance(result, list)
+                    if len(result) > 0:
+                        from frames import FrameCandidate
+                        assert isinstance(result[0], FrameCandidate)
 
 
 def test_extract_candidates_sorted_by_timestamp():
     """Candidates should be sorted by timestamp_sec ascending."""
     from frames import extract_candidates
 
+    f30 = Path("/tmp/k30.jpg")
+    f10 = Path("/tmp/k10.jpg")
+    f20 = Path("/tmp/k20.jpg")
     with patch("frames._run_katna") as mock_katna:
         with patch("frames._get_video_duration") as mock_duration:
             with patch("frames._scene_boundaries") as mock_boundaries:
-                # Return frames in reverse order
-                mock_katna.return_value = [
-                    Path("/tmp/keyframe_000000030.jpg"),
-                    Path("/tmp/keyframe_000000010.jpg"),
-                    Path("/tmp/keyframe_000000020.jpg"),
-                ]
-                mock_duration.return_value = 100.0
-                mock_boundaries.return_value = []
+                with patch("frames._recover_timestamps") as mock_recover:
+                    # Frames returned in reverse time order; recovery assigns the
+                    # true timestamps (NOT parsed from the filename index).
+                    mock_katna.return_value = [f30, f10, f20]
+                    mock_duration.return_value = 100.0
+                    mock_boundaries.return_value = []
+                    mock_recover.return_value = {f30: 30.0, f10: 10.0, f20: 20.0}
 
-                result = extract_candidates(Path("dummy.mp4"))
+                    result = extract_candidates(Path("dummy.mp4"))
 
-                # Check sorted by timestamp
-                for i in range(len(result) - 1):
-                    assert result[i].timestamp_sec <= result[i + 1].timestamp_sec
+                    # Check sorted by recovered timestamp
+                    for i in range(len(result) - 1):
+                        assert result[i].timestamp_sec <= result[i + 1].timestamp_sec
+
+
+def test_extract_candidates_uses_recovered_not_filename_timestamp():
+    """Regression (Bug A): the candidate timestamp must come from video matching,
+    NOT from the Katna filename index. A frame named '..._5.jpeg' (extraction
+    index 5) that really occurs at 600s must end up at 600s, not 5s."""
+    from frames import extract_candidates
+
+    frame = Path("/tmp/lecture_5.jpeg")  # index-5 filename, real time 600s
+    with patch("frames._run_katna", return_value=[frame]):
+        with patch("frames._get_video_duration", return_value=1200.0):
+            with patch("frames._scene_boundaries", return_value=[]):
+                with patch("frames._recover_timestamps", return_value={frame: 600.0}):
+                    result = extract_candidates(Path("dummy.mp4"))
+
+    assert len(result) == 1
+    assert result[0].timestamp_sec == 600.0  # recovered, not the filename's 5
+    assert result[0].section_index == 5  # 600/1200*10
+
+
+def test_rename_with_timestamp_encodes_time():
+    """Bug A: the persisted filename must encode the recovered timestamp so it is
+    visible to the VLM router, and be readable back by _extract_timestamp."""
+    import tempfile
+
+    from frames import _extract_timestamp, _rename_with_timestamp
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "lecture_5.jpeg"
+        src.write_bytes(b"x")
+        out = _rename_with_timestamp(src, 46.7)
+
+        assert out.exists()
+        assert out.name == "keyframe_000000047_00m47s.jpeg"  # round(46.7)=47
+        assert _extract_timestamp(out.name) == 47.0
+
+
+def test_run_katna_globs_jpeg_extension():
+    """Regression (Bug B): Katna writes .jpeg by default; globbing only *.jpg
+    would silently return zero frames."""
+    import sys
+    from types import SimpleNamespace
+
+    class FakeWriter:
+        def __init__(self, location):
+            self.location = location
+
+    class FakeVideo:
+        def extract_video_keyframes(self, no_of_frames, file_path, writer):
+            # Katna's default extension is .jpeg, not .jpg.
+            (Path(writer.location) / "video_0.jpeg").write_bytes(b"x")
+
+    fake_video_mod = SimpleNamespace(Video=FakeVideo)
+    fake_writer_mod = SimpleNamespace(KeyFrameDiskWriter=FakeWriter)
+
+    with patch.dict(
+        sys.modules,
+        {"Katna.video": fake_video_mod, "Katna.writer": fake_writer_mod},
+    ):
+        from frames import _run_katna
+
+        paths = _run_katna(Path("dummy.mp4"), 1)
+
+    assert len(paths) == 1
+    assert paths[0].suffix == ".jpeg"
+
+    import shutil
+
+    shutil.rmtree(paths[0].parent, ignore_errors=True)
+
+
+def test_fill_coverage_gaps_fills_empty_sections():
+    """Timeline-bias mitigation: empty timeline sections get a gap-fill frame
+    (Katna clusters frames in early sections, leaving later ones empty)."""
+    from frames import FrameCandidate, _fill_coverage_gaps
+
+    duration = 1000.0
+    # Only sections 0 and 1 covered; 2..9 are empty.
+    existing = [
+        FrameCandidate(Path("/tmp/a.jpg"), 50.0, 0, 1.0, False),
+        FrameCandidate(Path("/tmp/b.jpg"), 150.0, 1, 1.0, False),
+    ]
+
+    def fake_extract(video_path, t, out_dir):
+        return Path(f"/tmp/gap_{int(t)}.jpg")
+
+    with patch("frames._extract_frame_at", side_effect=fake_extract):
+        with patch("frames._laplacian_score", return_value=0.5):
+            added = _fill_coverage_gaps(
+                Path("dummy.mp4"), existing, [], duration, Path("/tmp")
+            )
+
+    filled_sections = {c.section_index for c in added}
+    assert filled_sections == set(range(2, 10))  # all empty sections filled
+    # No duplicates of already-covered sections.
+    assert 0 not in filled_sections and 1 not in filled_sections
+
+
+def test_fill_coverage_gaps_prefers_scene_boundary():
+    """A gap-fill frame should land on a scene boundary inside the empty section
+    when one exists, rather than the section midpoint."""
+    from frames import FrameCandidate, _fill_coverage_gaps
+
+    duration = 100.0  # each section spans 10s
+    existing = [FrameCandidate(Path("/tmp/a.jpg"), 5.0, 0, 1.0, False)]
+    # Boundary at 52s sits inside section 5 (50–60s); midpoint would be 55.
+    boundaries = [52.0]
+
+    def fake_extract(video_path, t, out_dir):
+        return Path(f"/tmp/gap_{int(t)}.jpg")
+
+    with patch("frames._extract_frame_at", side_effect=fake_extract):
+        with patch("frames._laplacian_score", return_value=0.5):
+            added = _fill_coverage_gaps(
+                Path("dummy.mp4"), existing, boundaries, duration, Path("/tmp")
+            )
+
+    sec5 = next(c for c in added if c.section_index == 5)
+    assert sec5.timestamp_sec == 52.0  # snapped to the boundary, not midpoint 55
+    assert sec5.is_scene_boundary is True
 
 
 def test_laplacian_score_bounds():
@@ -155,7 +280,7 @@ def test_run_katna_returns_persistent_paths():
 
     with patch.dict(
         sys.modules,
-        {"katna.video": fake_video_mod, "katna.writer": fake_writer_mod},
+        {"Katna.video": fake_video_mod, "Katna.writer": fake_writer_mod},
     ):
         from frames import _run_katna
 
