@@ -46,6 +46,12 @@ DESC_SIZE = 32           # fingerprint resolution (grayscale DESC_SIZE×DESC_SIZ
 LAPLACIAN_NORM = 500.0   # empirical upper bound for sharpness normalisation
 NUM_SECTIONS = 10        # timeline buckets for section_index / coverage
 
+# PySceneDetect ContentDetector sensitivity. The library default (27) finds very
+# few cuts on lecture/slide video with no hard transitions; the ts1 scratch lab
+# measured threshold≈15 → full 10/10-decile coverage (vs 2/10 at 27). Lower =
+# more boundaries. Used both for the advisory flag and for coverage gap-fill.
+SCENE_DETECT_THRESHOLD = 15.0
+
 # Katna's keyframe writer emits .jpeg by default, but the extension can vary by
 # version/codec — glob both rather than silently matching zero files.
 _KATNA_GLOBS = ("*.jpeg", "*.jpg", "*.png")
@@ -76,7 +82,10 @@ def extract_candidates(
         3. Compute quality_score (Laplacian variance) and section_index.
         4. Optional reinforcement: run scenedetect ContentDetector and flag
            frames within ±TOPIC_ALIGN_WINDOW_SEC of a scene boundary.
-        5. Return the list sorted by timestamp_sec ascending.
+        5. Fill timeline-coverage gaps: Katna is timeline-biased and can leave
+           whole sections empty; add one frame per empty section (scene boundary
+           inside it, else the midpoint) so the VLM sees the full talk.
+        6. Return the list sorted by timestamp_sec ascending.
 
     Note: is_scene_boundary is advisory only — final selection is done by the VLM
     router (typing_select.py) + BGE-M3 caption topic-change alignment.
@@ -115,11 +124,7 @@ def extract_candidates(
         )
 
         # Assign section_index from timestamp proportion
-        section_index = (
-            min(int(timestamp_sec / duration * NUM_SECTIONS), NUM_SECTIONS - 1)
-            if duration > 0
-            else 0
-        )
+        section_index = _section_index(timestamp_sec, duration)
 
         candidate = FrameCandidate(
             path=frame_path,
@@ -130,10 +135,98 @@ def extract_candidates(
         )
         candidates.append(candidate)
 
-    # Step 5: Sort by timestamp
+    # Step 5: Fill timeline-coverage gaps. Katna is timeline-biased (it can leave
+    # whole sections empty — measured on real lecture video), which means the VLM
+    # never sees those parts of the talk. For each empty section, pull one extra
+    # frame (preferring a PySceneDetect boundary inside it, else the midpoint).
+    out_dir = candidates[0].path.parent if candidates else None
+    candidates.extend(
+        _fill_coverage_gaps(
+            video_path, candidates, scene_boundaries, duration, out_dir
+        )
+    )
+
+    # Step 6: Sort by timestamp
     candidates.sort(key=lambda c: c.timestamp_sec)
 
     return candidates
+
+
+def _section_index(timestamp_sec: float, duration: float) -> int:
+    """Map a timestamp to its [0, NUM_SECTIONS) timeline bucket."""
+    if duration <= 0:
+        return 0
+    return min(int(timestamp_sec / duration * NUM_SECTIONS), NUM_SECTIONS - 1)
+
+
+def _fill_coverage_gaps(
+    video_path: Path,
+    candidates: list[FrameCandidate],
+    scene_boundaries: list[float],
+    duration: float,
+    out_dir: Path | None,
+) -> list[FrameCandidate]:
+    """Add one frame per empty timeline section to counter Katna's bias.
+
+    For each section (0..NUM_SECTIONS-1) with no candidate, choose a timestamp —
+    a scene boundary that falls inside the section if one exists, otherwise the
+    section midpoint — extract that frame and emit a FrameCandidate. Returns the
+    list of added candidates (possibly empty). Never raises: a section that can't
+    be extracted is simply skipped.
+    """
+    if duration <= 0:
+        return []
+    if out_dir is None:
+        out_dir = Path(tempfile.mkdtemp(prefix="slidegen_gapfill_"))
+
+    covered = {c.section_index for c in candidates}
+    added: list[FrameCandidate] = []
+    for section in range(NUM_SECTIONS):
+        if section in covered:
+            continue
+        lo = section / NUM_SECTIONS * duration
+        hi = (section + 1) / NUM_SECTIONS * duration
+        in_section = [b for b in scene_boundaries if lo <= b < hi]
+        target_t = in_section[len(in_section) // 2] if in_section else (lo + hi) / 2
+
+        frame_path = _extract_frame_at(video_path, target_t, out_dir)
+        if frame_path is None:
+            continue
+        added.append(
+            FrameCandidate(
+                path=frame_path,
+                timestamp_sec=round(target_t, 2),
+                section_index=section,
+                quality_score=_laplacian_score(frame_path),
+                is_scene_boundary=bool(in_section),
+            )
+        )
+    return added
+
+
+def _extract_frame_at(video_path: Path, t: float, out_dir: Path) -> Path | None:
+    """Decode a single frame at ~t seconds and save it with a timestamp name.
+
+    Returns the saved path, or None if the frame could not be read. Uses a seek
+    (acceptable for a handful of gap frames); recovery of the bulk Katna frames
+    stays seek-free.
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return None
+    cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+    ok, frame = cap.read()
+    cap.release()
+    if not ok or frame is None:
+        return None
+
+    total = int(round(t))
+    minutes, seconds = divmod(total, 60)
+    name = f"keyframe_{total:09d}_{minutes:02d}m{seconds:02d}s_gapfill.jpg"
+    dst = out_dir / name
+    if not cv2.imwrite(str(dst), frame):
+        return None
+    return dst
 
 
 def _get_video_duration(video_path: Path) -> float:
@@ -167,7 +260,9 @@ def _patch_katna_empty_cluster() -> None:
     name-mangled, so we assign to the literal attribute.
     """
     try:
-        from katna.image_selector import ImageSelector
+        # Capital "Katna" — the canonical package name. Lowercase resolves on
+        # case-insensitive macOS but ImportErrors on case-sensitive Linux prod.
+        from Katna.image_selector import ImageSelector
     except ImportError:
         return
 
@@ -202,11 +297,13 @@ def _run_katna(video_path: Path, target_count: int) -> list[Path]:
     the returned directory.
     """
     try:
-        from katna.video import Video
-        from katna.writer import KeyFrameDiskWriter
+        # Capital "Katna" — the canonical package name. Lowercase resolves on
+        # case-insensitive macOS but ImportErrors on case-sensitive Linux prod.
+        from Katna.video import Video
+        from Katna.writer import KeyFrameDiskWriter
     except ImportError as e:
         raise ImportError(
-            "katna not installed. Install with: pip install katna"
+            "Katna not installed. Install with: pip install katna"
         ) from e
 
     _patch_katna_empty_cluster()
@@ -266,13 +363,20 @@ def _build_video_index(video_path: Path) -> list[tuple[float, np.ndarray]]:
     index: list[tuple[float, np.ndarray]] = []
     frame_i = 0
     while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
         if frame_i % stride == 0:
+            # Sampled frame: fully decode (grab + retrieve).
+            ok, frame = cap.read()
+            if not ok:
+                break
             pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
             t = pos_ms / 1000.0 if pos_ms > 0 else (frame_i / fps if fps > 0 else 0.0)
             index.append((round(t, 2), _descriptor(frame)))
+        else:
+            # Skipped frame: grab() advances the decoder WITHOUT the (expensive)
+            # pixel retrieve, so we don't decode ~every frame just to sample a
+            # few. Still forward-only → deterministic on corrupt/partial files.
+            if not cap.grab():
+                break
         frame_i += 1
     cap.release()
     return index
@@ -342,7 +446,9 @@ def _scene_boundaries(video_path: Path) -> list[float]:
         return []
 
     try:
-        scene_list = detect(str(video_path), ContentDetector())
+        scene_list = detect(
+            str(video_path), ContentDetector(threshold=SCENE_DETECT_THRESHOLD)
+        )
         # Each scene is a (start, end) timecode pair; take each scene's start.
         return [scene[0].get_seconds() for scene in scene_list]
     except Exception:

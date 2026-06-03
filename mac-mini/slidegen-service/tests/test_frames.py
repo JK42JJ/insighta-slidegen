@@ -124,7 +124,7 @@ def test_run_katna_globs_jpeg_extension():
 
     with patch.dict(
         sys.modules,
-        {"katna.video": fake_video_mod, "katna.writer": fake_writer_mod},
+        {"Katna.video": fake_video_mod, "Katna.writer": fake_writer_mod},
     ):
         from frames import _run_katna
 
@@ -136,6 +136,57 @@ def test_run_katna_globs_jpeg_extension():
     import shutil
 
     shutil.rmtree(paths[0].parent, ignore_errors=True)
+
+
+def test_fill_coverage_gaps_fills_empty_sections():
+    """Timeline-bias mitigation: empty timeline sections get a gap-fill frame
+    (Katna clusters frames in early sections, leaving later ones empty)."""
+    from frames import FrameCandidate, _fill_coverage_gaps
+
+    duration = 1000.0
+    # Only sections 0 and 1 covered; 2..9 are empty.
+    existing = [
+        FrameCandidate(Path("/tmp/a.jpg"), 50.0, 0, 1.0, False),
+        FrameCandidate(Path("/tmp/b.jpg"), 150.0, 1, 1.0, False),
+    ]
+
+    def fake_extract(video_path, t, out_dir):
+        return Path(f"/tmp/gap_{int(t)}.jpg")
+
+    with patch("frames._extract_frame_at", side_effect=fake_extract):
+        with patch("frames._laplacian_score", return_value=0.5):
+            added = _fill_coverage_gaps(
+                Path("dummy.mp4"), existing, [], duration, Path("/tmp")
+            )
+
+    filled_sections = {c.section_index for c in added}
+    assert filled_sections == set(range(2, 10))  # all empty sections filled
+    # No duplicates of already-covered sections.
+    assert 0 not in filled_sections and 1 not in filled_sections
+
+
+def test_fill_coverage_gaps_prefers_scene_boundary():
+    """A gap-fill frame should land on a scene boundary inside the empty section
+    when one exists, rather than the section midpoint."""
+    from frames import FrameCandidate, _fill_coverage_gaps
+
+    duration = 100.0  # each section spans 10s
+    existing = [FrameCandidate(Path("/tmp/a.jpg"), 5.0, 0, 1.0, False)]
+    # Boundary at 52s sits inside section 5 (50–60s); midpoint would be 55.
+    boundaries = [52.0]
+
+    def fake_extract(video_path, t, out_dir):
+        return Path(f"/tmp/gap_{int(t)}.jpg")
+
+    with patch("frames._extract_frame_at", side_effect=fake_extract):
+        with patch("frames._laplacian_score", return_value=0.5):
+            added = _fill_coverage_gaps(
+                Path("dummy.mp4"), existing, boundaries, duration, Path("/tmp")
+            )
+
+    sec5 = next(c for c in added if c.section_index == 5)
+    assert sec5.timestamp_sec == 52.0  # snapped to the boundary, not midpoint 55
+    assert sec5.is_scene_boundary is True
 
 
 def test_laplacian_score_bounds():
@@ -229,7 +280,7 @@ def test_run_katna_returns_persistent_paths():
 
     with patch.dict(
         sys.modules,
-        {"katna.video": fake_video_mod, "katna.writer": fake_writer_mod},
+        {"Katna.video": fake_video_mod, "Katna.writer": fake_writer_mod},
     ):
         from frames import _run_katna
 
