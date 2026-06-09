@@ -1,6 +1,15 @@
 # ADR 0001 — Pipeline v1: VLM-routed frame selection + specialized extraction
 
-**Status**: Accepted
+> ⚠️ **SUPERSEDED by [ADR 0002 — Pipeline v3](./0002-pipeline-v3-cpu-downsample-caption-context.md) (2026-06-09).**
+> This ADR is retained for historical context. The accepted current design replaces
+> Katna→PySceneDetect (D1→0002 D1), keeps YOLO as boxes-only with Qwen as the kind
+> authority (0002 D2), adds a CPU downsample before the VLM (0002 D3), merges
+> selection+classification into one Qwen3-VL call with caption context (0002 D4/D5),
+> carries time-provenance intervals (0002 D6), routes charts to Qwen3-VL (0002 D7),
+> and revises infra to A100/RunPod (0002 D9). The LLM-API ban (D5), vector-300dpi
+> gate (D6/D7), output contract, and `slide_*`-only writes are **carried forward**.
+
+**Status**: Superseded by ADR 0002 (was: Accepted)
 **Date**: 2026-06-01
 **Supersedes**: the DRAFT frame-selection hypothesis in
 `docs/architecture/slidegen-architecture.md` §1 (Katna → CLIP → BGE-M3 →
