@@ -203,7 +203,7 @@ Figures with `verification_status == "dropped"` are never attached. Figures with
 
 ### 5.2 Frame Extraction and Selection (80 candidates → ~12 final frames)
 
-> **STATUS: DRAFT HYPOTHESIS (v1).** The Katna → CLIP → BGE-M3(captions) → pgvector-distance → ~12 pipeline below is the **initial working hypothesis**, not the locked architecture. The effective frame-selection architecture will be **finalized through research** (model choice, dedup thresholds, caption-alignment method, whether Katna/PySceneDetect/other is the best extractor). Treat thresholds and tool choices here as starting points to validate, not commitments.
+> **STATUS: SUPERSEDED — see [ADR 0002 — Pipeline v3](adr/0002-pipeline-v3-cpu-downsample-caption-context.md).** The Katna → CLIP → BGE-M3(captions) → pgvector-distance → ~12 pipeline below is **obsolete**. The accepted design is: **PySceneDetect** extract → **DocLayout-YOLO** boxes (WHERE) → **CPU downsample ~200→~60** (pHash + time-even) → **Qwen3-VL** one-call select+classify (WHAT) with **caption context** (captions are a hint, never keep/drop) → kind-routed experts. CLIP/pgvector-dedup is removed; the VLM family is Qwen3-VL. The text below is retained for historical context only. *(Was: DRAFT HYPOTHESIS v1.)*
 
 The goal is to produce approximately 12 final frames — one per distinct topic the video genuinely covers — each carrying its original source timestamp for click-to-jump navigation.
 

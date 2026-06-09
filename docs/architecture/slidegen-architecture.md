@@ -18,12 +18,16 @@
 
 ## 1. Component Diagram
 
-> **DRAFT — superseded by [ADR 0001](../adr/0001-pipeline-v1-frame-selection-and-extraction.md).**
-> The CLIP + BGE-M3 + pgvector-dedup hypothesis below is replaced for v1 by a
-> local VLM router (Qwen2.5-VL) + conditional DocLayout-YOLO / UniMERNet
-> extraction (synthesis stays in the Claude Code console; Google Slides + vector
-> PDF output unchanged). The diagram below is retained for historical context;
-> see ADR 0001 for the accepted v1 design. (Original DRAFT ref: PRD §5.2.)
+> **DRAFT — superseded by [ADR 0002 — Pipeline v3](../adr/0002-pipeline-v3-cpu-downsample-caption-context.md)** (which supersedes ADR 0001).
+> The CLIP + BGE-M3 + pgvector-dedup hypothesis below is **obsolete**. The accepted
+> design is: **PySceneDetect** extract → **DocLayout-YOLO** boxes (WHERE) → **CPU
+> downsample ~200→~60** → **Qwen3-VL** one-call select+classify (WHAT) with
+> **caption context** → experts (equation→UniMERNet, text/table→PaddleOCR,
+> chart/graph/diagram→Qwen3-VL, handwriting/photo→drop) → vector redraw → Claude
+> Code console synthesis → Google Slides + vector PDF. CLIP/pgvector-dedup is fully
+> removed; the VLM family is **Qwen3-VL** (not CLIP, not Qwen2.5-VL). The diagram
+> and Run-Location rows below are retained for historical context only; see ADR 0002
+> (and `cv_pipeline_v3_caption_context.svg` / `stage5_routing_v3.svg`).
 
 ```mermaid
 graph TD
@@ -85,6 +89,12 @@ graph TD
 ---
 
 ## 2. Run-Location Reference
+
+> ⚠️ **Stale rows (v0.1)**: per [ADR 0002](../adr/0002-pipeline-v3-cpu-downsample-caption-context.md),
+> *CLIP image embeddings*, *pgvector cosine dedup*, and *pix2tex* are **removed**.
+> The v3 stack runs PySceneDetect, DocLayout-YOLO, a CPU pHash+time-even downsample,
+> **Qwen3-VL** (select+classify, caption context), UniMERNet, and PaddleOCR. Prod
+> inference is **A100/RunPod** (the Mac Mini host remains the dev/test local path).
 
 | Component | Host | Language / Runtime | Network |
 |---|---|---|---|
