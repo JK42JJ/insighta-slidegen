@@ -1,155 +1,256 @@
 """
-Wide-net candidate frame extraction using Katna.
+Wide-net candidate frame extraction — PySceneDetect PRIMARY (ADR 0002 D1).
 
-Primary extractor: Katna VideoFrameSelector — pulls ~80 candidate frames
-per video by sampling at regular intervals and retaining frames with high
-information content.  The goal is a *wide net*: cast broadly, accept some
-junk.  Downstream selection (select.py / pgvector dedup) will narrow to ~12.
+Stage-1 extractor for the CV pipeline. PySceneDetect `ContentDetector` cuts the
+video into scenes with **exact decimal timecodes** in a single decode pass and
+full timeline coverage (no front bias, no static-video crash). Katna — the
+previous primary — is retired (ADR 0002 D1), which also removes the entire
+fingerprint timestamp-recovery machinery (it existed only because Katna encoded
+an extraction *index*, not a time, into filenames).
 
-PySceneDetect is an optional reinforcement pass only: it may flag additional
-scene-boundary timestamps but is NOT the primary selector.
+Pipeline shape (ADR 0002 D3, ADR 0003 D5 — recall-first):
 
-IMPORTANT — timestamps are recovered, not parsed from filenames:
-Katna's KeyFrameDiskWriter names files "<stem>_<seq>.jpeg" where <seq> is a
-0,1,2,... extraction index, NOT a wall-clock time. Treating that index as a
-timestamp (the previous behaviour) put every frame at the wrong moment in the
-video, breaking section_index, scene-boundary alignment and downstream VLM
-routing. We instead recover each keyframe's true timestamp by fingerprint-
-matching it back against the source video, then encode that time into the
-persisted filename so it is visible to the VLM router.
+    1. WIDE NET  — one candidate per detected scene start, plus gap-fill grabs
+       so every timeline decile is covered (~target 200; over-extraction is
+       fine — a *missed* slide transition is the only unrecoverable failure).
+    2. CPU DOWNSAMPLE — pHash near-duplicate merge + time-even cut to ~60,
+       implemented as a separate pure function (`downsample_candidates`) so the
+       wide net and the cut are independently testable.
 
-Entry function: extract_candidates(video_path, target_count) → list[FrameCandidate]
+Time provenance (ADR 0002 D6): every candidate carries an interval
+[`t_start`, `t_end`] (seconds). The pHash merge expands the kept frame's
+interval to span the whole merged group [min start, max end]. Persisted
+filenames encode the interval as `keyframe_{idx}_[MMmSSs-MMmSSs].jpeg`
+(no ':' — illegal on Windows; '-' instead of '~').
+
+A post-download duration-validation gate (`validate_video_duration`) fails
+loud on gross mismatch between the file's actual duration and the expected
+duration (partial / truncated download).
+
+Entry function: extract_candidates(video_path, ...) → list[FrameCandidate]
 """
 
 from __future__ import annotations
 
-import re
-import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-# Target candidate count — wide net before embedding-based selection.
-KATNA_TARGET_COUNT = 80
-TOPIC_ALIGN_WINDOW_SEC = 3.0
+# --- wide net / downsample targets (ADR 0002 D3: ~200 → ~60) ---------------
+WIDE_NET_TARGET_COUNT = 200
+DOWNSAMPLE_TARGET_COUNT = 60
 
-# --- timestamp recovery tuning -------------------------------------------
-# The index is built by a single SEQUENTIAL decode pass (no seeking). Seeking
-# via cap.set(POS_MSEC) is non-deterministic on corrupt / B-frame-heavy files
-# (returns wrong or garbage frames), which made an earlier seek-based recovery
-# unstable. A forward-only read is deterministic and robust on partial files.
-INDEX_STEP_SEC = 0.5     # sample the source video every N seconds for the index
-DESC_SIZE = 32           # fingerprint resolution (grayscale DESC_SIZE×DESC_SIZE)
-LAPLACIAN_NORM = 500.0   # empirical upper bound for sharpness normalisation
-NUM_SECTIONS = 10        # timeline buckets for section_index / coverage
+# Timeline buckets (deciles) for section_index / coverage gap-fill.
+NUM_SECTIONS = 10
 
-# PySceneDetect ContentDetector sensitivity. The library default (27) finds very
-# few cuts on lecture/slide video with no hard transitions; the ts1 scratch lab
-# measured threshold≈15 → full 10/10-decile coverage (vs 2/10 at 27). Lower =
-# more boundaries. Used both for the advisory flag and for coverage gap-fill.
+# PySceneDetect ContentDetector sensitivity (ADR 0002 D1). The library default
+# (27) finds very few cuts on lecture/slide video with no hard transitions
+# (fades / pen build-up need th≈3–15); the ts1 scratch lab measured
+# threshold≈15 → full 10/10-decile coverage (vs 2/10 at 27). Lower = more
+# boundaries. Measured starting point — adjust only with new measurements.
 SCENE_DETECT_THRESHOLD = 15.0
 
-# Katna's keyframe writer emits .jpeg by default, but the extension can vary by
-# version/codec — glob both rather than silently matching zero files.
-_KATNA_GLOBS = ("*.jpeg", "*.jpg", "*.png")
+# --- pHash (CPU downsample stage, ADR 0002 D3) ------------------------------
+# 32×32 DCT → top-left 8×8 low-frequency block → 64-bit hash. Implemented with
+# cv2.dct + numpy (opencv-python does not ship cv2.img_hash — that lives in
+# opencv-contrib — and a self-contained DCT keeps the hash identical across
+# environments).
+PHASH_DCT_SIZE = 32
+PHASH_HASH_SIZE = 8
+# Hamming distance (out of 64 bits) at or below which two frames are merged as
+# near-duplicates. 10/64 is the common pHash near-dup band; recall-first says
+# err low (merge less) rather than high.
+PHASH_NEAR_DUP_MAX_DISTANCE = 10
+
+# --- duration-validation gate -----------------------------------------------
+# Relative mismatch above which the downloaded file is considered truncated /
+# partial. 10%: yt-dlp metadata durations and container durations differ by
+# seconds, not minutes; a partial download is typically off by far more.
+DURATION_MISMATCH_TOLERANCE = 0.10
+
+# Sharpness normalisation for quality_score (empirical upper bound, carried
+# over from the previous implementation).
+LAPLACIAN_NORM = 500.0
+
+JPEG_SUFFIX = ".jpeg"
+
+
+class VideoDurationMismatchError(RuntimeError):
+    """Downloaded video duration grossly differs from the expected duration."""
 
 
 @dataclass
 class FrameCandidate:
-    """A single candidate frame with quality metadata."""
+    """A single candidate frame with quality metadata and time provenance.
+
+    `t_start` / `t_end` (ADR 0002 D6) are the interval of video time this frame
+    represents — initially its enclosing scene; widened by the pHash merge to
+    span the whole merged group. They default to `timestamp_sec` so existing
+    positional construction (5 args) keeps working for consumers.
+    """
     path: Path
     timestamp_sec: float
     section_index: int
-    quality_score: float  # 0.0 – 1.0; Katna information-content score
-    is_scene_boundary: bool  # True if PySceneDetect reinforcement flagged this frame
+    quality_score: float          # 0.0 – 1.0; Laplacian sharpness
+    is_scene_boundary: bool       # True if this frame sits on a PySceneDetect cut
+    t_start: float = field(default=-1.0)
+    t_end: float = field(default=-1.0)
+
+    def __post_init__(self) -> None:
+        if self.t_start < 0:
+            self.t_start = self.timestamp_sec
+        if self.t_end < 0:
+            self.t_end = self.timestamp_sec
 
 
 def extract_candidates(
     video_path: Path,
-    target_count: int = KATNA_TARGET_COUNT,
+    target_count: int = WIDE_NET_TARGET_COUNT,
+    downsample_to: int = DOWNSAMPLE_TARGET_COUNT,
+    expected_duration_sec: float | None = None,
 ) -> list[FrameCandidate]:
     """
-    Extract ~target_count candidate frames from video_path using Katna.
+    Extract candidate frames: PySceneDetect wide net → CPU downsample.
 
     Algorithm:
-        1. Run Katna to produce a wide candidate set (~target_count), copied to a
-           persistent dir (extensions vary, so several globs are tried).
-        2. Recover each keyframe's TRUE timestamp by matching it back against the
-           source video, and rename the persisted file to encode that time.
-        3. Compute quality_score (Laplacian variance) and section_index.
-        4. Optional reinforcement: run scenedetect ContentDetector and flag
-           frames within ±TOPIC_ALIGN_WINDOW_SEC of a scene boundary.
-        5. Fill timeline-coverage gaps: Katna is timeline-biased and can leave
-           whole sections empty; add one frame per empty section (scene boundary
-           inside it, else the midpoint) so the VLM sees the full talk.
-        6. Return the list sorted by timestamp_sec ascending.
+        1. Duration gate — if expected_duration_sec is given, fail loud when the
+           file's actual duration grossly mismatches it (partial download).
+        2. PySceneDetect ContentDetector (SCENE_DETECT_THRESHOLD) → scene list
+           with exact timecodes; one candidate per scene start, carrying the
+           scene's [t_start, t_end] interval.
+        3. Recall-first gap-fill (ADR 0003 D5): every timeline decile with no
+           candidate gets a grab at its midpoint so the VLM sees the full talk
+           even on sparse-cut / static video.
+        4. Decode all candidate frames in ONE forward pass (no seeking — seeks
+           are non-deterministic on corrupt/partial files).
+        5. CPU downsample (ADR 0002 D3): pHash near-dup merge (interval
+           expansion) + time-even cut to ~downsample_to. Never drops the last
+           representative of a merged group.
+        6. Persist survivors as keyframe_{idx}_[MMmSSs-MMmSSs].jpeg, sorted by
+           timestamp_sec ascending.
 
-    Note: is_scene_boundary is advisory only — final selection is done by the VLM
-    router (typing_select.py) + BGE-M3 caption topic-change alignment.
+    `target_count` is a soft wide-net target: the wide net is never truncated
+    below the detected scene count (recall-first — dropping a scene start could
+    lose a transition); the downsample stage is the only cut.
     """
-    # Get video duration
     duration = _get_video_duration(video_path)
+    if duration <= 0:
+        raise RuntimeError(f"Video has no readable duration: {video_path}")
 
-    # Step 1: Run Katna to extract ~target_count candidates
-    katna_frames = _run_katna(video_path, target_count)
+    if expected_duration_sec is not None:
+        validate_video_duration(video_path, expected_duration_sec, duration=duration)
 
-    # Step 2: Recover the true timestamp of each keyframe (Katna only gives an
-    # extraction index in the filename) and rename to encode it.
-    timestamps = _recover_timestamps(video_path, katna_frames, duration)
+    # Step 2: scenes (exact decimal timecodes; full-timeline coverage).
+    scenes = _detect_scenes(video_path)
+    if not scenes:
+        scenes = [(0.0, duration)]
 
-    # Step 3: Detect scene boundaries (optional reinforcement)
-    scene_boundaries = _scene_boundaries(video_path)
+    # One spec per scene start: (timestamp, t_start, t_end, is_scene_boundary).
+    specs: list[tuple[float, float, float, bool]] = [
+        (start, start, end, True) for start, end in scenes
+    ]
 
-    # Step 4: Build FrameCandidate list with quality scores
-    candidates = []
-    for frame_path in katna_frames:
-        timestamp_sec = timestamps.get(frame_path)
-        if timestamp_sec is None:
+    # Step 3: recall-first decile gap-fill.
+    specs.extend(_gap_fill_specs(specs, duration))
+    specs.sort(key=lambda s: s[0])
+
+    # Step 4: single forward-pass decode of all requested timestamps.
+    out_dir = Path(tempfile.mkdtemp(prefix="slidegen_frames_"))
+    grabbed = _grab_frames(video_path, [s[0] for s in specs], out_dir)
+
+    candidates: list[FrameCandidate] = []
+    for (t, t_start, t_end, is_boundary), frame_path in zip(specs, grabbed):
+        if frame_path is None:
             continue
-
-        # Encode the recovered time into the filename so it is visible to the VLM
-        # router (e.g. keyframe_000000046_00m46s.jpg).
-        frame_path = _rename_with_timestamp(frame_path, timestamp_sec)
-
-        # Compute quality score (Laplacian variance)
-        quality_score = _laplacian_score(frame_path)
-
-        # Check if this frame is near a scene boundary
-        is_boundary = any(
-            abs(timestamp_sec - boundary) <= TOPIC_ALIGN_WINDOW_SEC
-            for boundary in scene_boundaries
+        candidates.append(
+            FrameCandidate(
+                path=frame_path,
+                timestamp_sec=round(t, 2),
+                section_index=_section_index(t, duration),
+                quality_score=_laplacian_score(frame_path),
+                is_scene_boundary=is_boundary,
+                t_start=round(t_start, 2),
+                t_end=round(t_end, 2),
+            )
         )
 
-        # Assign section_index from timestamp proportion
-        section_index = _section_index(timestamp_sec, duration)
+    # Step 5: CPU downsample (pure function — independently tested).
+    kept = downsample_candidates(candidates, target=downsample_to)
 
-        candidate = FrameCandidate(
-            path=frame_path,
-            timestamp_sec=timestamp_sec,
-            section_index=section_index,
-            quality_score=quality_score,
-            is_scene_boundary=is_boundary,
-        )
-        candidates.append(candidate)
+    # Step 6: persist survivors under the interval filename format (D6) and
+    # remove merged-away frames from disk.
+    kept_paths = {c.path for c in kept}
+    for c in candidates:
+        if c.path not in kept_paths:
+            c.path.unlink(missing_ok=True)
+    kept.sort(key=lambda c: c.timestamp_sec)
+    for idx, c in enumerate(kept):
+        c.path = _rename_with_interval(c.path, idx, c.t_start, c.t_end)
+    return kept
 
-    # Step 5: Fill timeline-coverage gaps. Katna is timeline-biased (it can leave
-    # whole sections empty — measured on real lecture video), which means the VLM
-    # never sees those parts of the talk. For each empty section, pull one extra
-    # frame (preferring a PySceneDetect boundary inside it, else the midpoint).
-    out_dir = candidates[0].path.parent if candidates else None
-    candidates.extend(
-        _fill_coverage_gaps(
-            video_path, candidates, scene_boundaries, duration, out_dir
+
+# ----------------------------------------------------------------
+# Duration-validation gate
+# ----------------------------------------------------------------
+
+def validate_video_duration(
+    video_path: Path,
+    expected_duration_sec: float,
+    tolerance: float = DURATION_MISMATCH_TOLERANCE,
+    duration: float | None = None,
+) -> float:
+    """Fail loud when the file's actual duration grossly mismatches expected.
+
+    Guards against partial/truncated downloads reaching extraction (where they
+    would silently produce a deck missing the tail of the talk). Returns the
+    actual duration on success; raises VideoDurationMismatchError on gross
+    mismatch.
+    """
+    actual = _get_video_duration(video_path) if duration is None else duration
+    if expected_duration_sec <= 0:
+        raise ValueError("expected_duration_sec must be > 0")
+    if abs(actual - expected_duration_sec) / expected_duration_sec > tolerance:
+        raise VideoDurationMismatchError(
+            f"Video duration mismatch for {video_path.name}: actual {actual:.1f}s "
+            f"vs expected {expected_duration_sec:.1f}s (tolerance "
+            f"{tolerance:.0%}) — likely a partial/truncated download"
         )
+    return actual
+
+
+# ----------------------------------------------------------------
+# Wide net — PySceneDetect + decile gap-fill
+# ----------------------------------------------------------------
+
+def _detect_scenes(video_path: Path) -> list[tuple[float, float]]:
+    """Detect scenes via PySceneDetect ContentDetector (PRIMARY — ADR 0002 D1).
+
+    Returns [(start_sec, end_sec), ...] with exact decimal timecodes.
+    `start_in_scene=True` makes a cut-free (static) video return one scene
+    spanning the whole timeline instead of an empty list.
+    """
+    # PySceneDetect 0.6+ high-level API (detect() wraps open_video+SceneManager).
+    from scenedetect import ContentDetector, detect
+
+    scene_list = detect(
+        str(video_path),
+        ContentDetector(threshold=SCENE_DETECT_THRESHOLD),
+        start_in_scene=True,
     )
+    return [(_timecode_seconds(s), _timecode_seconds(e)) for s, e in scene_list]
 
-    # Step 6: Sort by timestamp
-    candidates.sort(key=lambda c: c.timestamp_sec)
 
-    return candidates
+def _timecode_seconds(tc) -> float:
+    """FrameTimecode → seconds across scenedetect versions.
+
+    0.7 deprecates get_seconds() in favor of the `seconds` property; 0.6 only
+    has get_seconds().
+    """
+    seconds = getattr(tc, "seconds", None)
+    return float(seconds) if seconds is not None else float(tc.get_seconds())
 
 
 def _section_index(timestamp_sec: float, duration: float) -> int:
@@ -159,78 +260,249 @@ def _section_index(timestamp_sec: float, duration: float) -> int:
     return min(int(timestamp_sec / duration * NUM_SECTIONS), NUM_SECTIONS - 1)
 
 
-def _fill_coverage_gaps(
-    video_path: Path,
-    candidates: list[FrameCandidate],
-    scene_boundaries: list[float],
+def _gap_fill_specs(
+    specs: list[tuple[float, float, float, bool]],
     duration: float,
-    out_dir: Path | None,
-) -> list[FrameCandidate]:
-    """Add one frame per empty timeline section to counter Katna's bias.
+) -> list[tuple[float, float, float, bool]]:
+    """Specs for one midpoint grab per empty timeline decile (recall-first).
 
-    For each section (0..NUM_SECTIONS-1) with no candidate, choose a timestamp —
-    a scene boundary that falls inside the section if one exists, otherwise the
-    section midpoint — extract that frame and emit a FrameCandidate. Returns the
-    list of added candidates (possibly empty). Never raises: a section that can't
-    be extracted is simply skipped.
+    Sparse-cut / static video leaves whole deciles without a scene start; the
+    VLM would never see those parts of the talk. Each fill carries the decile's
+    own bounds as its interval (it represents that stretch of timeline, not an
+    instant). ADR 0003 D5: full-timeline coverage is the acceptance bar.
     """
     if duration <= 0:
         return []
-    if out_dir is None:
-        out_dir = Path(tempfile.mkdtemp(prefix="slidegen_gapfill_"))
-
-    covered = {c.section_index for c in candidates}
-    added: list[FrameCandidate] = []
+    covered = {_section_index(t, duration) for t, _, _, _ in specs}
+    fills: list[tuple[float, float, float, bool]] = []
     for section in range(NUM_SECTIONS):
         if section in covered:
             continue
         lo = section / NUM_SECTIONS * duration
         hi = (section + 1) / NUM_SECTIONS * duration
-        in_section = [b for b in scene_boundaries if lo <= b < hi]
-        target_t = in_section[len(in_section) // 2] if in_section else (lo + hi) / 2
-
-        frame_path = _extract_frame_at(video_path, target_t, out_dir)
-        if frame_path is None:
-            continue
-        added.append(
-            FrameCandidate(
-                path=frame_path,
-                timestamp_sec=round(target_t, 2),
-                section_index=section,
-                quality_score=_laplacian_score(frame_path),
-                is_scene_boundary=bool(in_section),
-            )
-        )
-    return added
+        fills.append(((lo + hi) / 2, lo, hi, False))
+    return fills
 
 
-def _extract_frame_at(video_path: Path, t: float, out_dir: Path) -> Path | None:
-    """Decode a single frame at ~t seconds and save it with a timestamp name.
+def _grab_frames(
+    video_path: Path,
+    timestamps: list[float],
+    out_dir: Path,
+) -> list[Path | None]:
+    """Decode the frames nearest each timestamp in ONE forward pass.
 
-    Returns the saved path, or None if the frame could not be read. Uses a seek
-    (acceptable for a handful of gap frames); recovery of the bulk Katna frames
-    stays seek-free.
+    Forward-only decode (no cap.set seeking) is deterministic and survives
+    corrupt/partial files where POS_MSEC seeks return wrong frames. Input
+    timestamps must be sorted ascending; returns one path (or None) per input,
+    in input order. Files are written with provisional names; the caller
+    renames survivors to the interval format after the downsample.
     """
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        return None
-    cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
-    ok, frame = cap.read()
+        raise RuntimeError(f"Failed to open video: {video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    results: list[Path | None] = [None] * len(timestamps)
+    next_i = 0
+    frame_i = 0
+    while next_i < len(timestamps):
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            break
+        t = frame_i / fps if fps > 0 else float(frame_i)
+        # Save this frame for every pending timestamp it has reached.
+        while next_i < len(timestamps) and t >= timestamps[next_i]:
+            dst = out_dir / f"wide_{next_i:04d}{JPEG_SUFFIX}"
+            if cv2.imwrite(str(dst), frame):
+                results[next_i] = dst
+            next_i += 1
+        frame_i += 1
     cap.release()
-    if not ok or frame is None:
-        return None
+    return results
 
-    total = int(round(t))
+
+# ----------------------------------------------------------------
+# CPU downsample — pHash near-dup merge + time-even cut (ADR 0002 D3)
+# ----------------------------------------------------------------
+
+def compute_phash(image: np.ndarray) -> int:
+    """64-bit perceptual hash: 32×32 grayscale DCT, top-left 8×8 vs median.
+
+    Self-contained cv2.dct implementation (opencv-python has no cv2.img_hash;
+    see PHASH_DCT_SIZE comment). Deterministic across platforms.
+    """
+    if image.ndim == 3:
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    small = cv2.resize(image, (PHASH_DCT_SIZE, PHASH_DCT_SIZE)).astype(np.float32)
+    dct = cv2.dct(small)
+    low = dct[:PHASH_HASH_SIZE, :PHASH_HASH_SIZE].flatten()
+    median = np.median(low)
+    bits = low > median
+    h = 0
+    for bit in bits:
+        h = (h << 1) | int(bit)
+    return h
+
+
+def phash_distance(a: int, b: int) -> int:
+    """Hamming distance between two 64-bit pHashes."""
+    return int(bin(a ^ b).count("1"))
+
+
+def merge_near_duplicates(
+    candidates: list[FrameCandidate],
+    hashes: list[int],
+    max_distance: int = PHASH_NEAR_DUP_MAX_DISTANCE,
+) -> list[FrameCandidate]:
+    """Merge runs of perceptually near-identical frames; expand intervals.
+
+    Walks the candidates in timestamp order and merges each frame into the
+    current group while its pHash is within max_distance of the group
+    representative's hash. The kept frame is the group's sharpest
+    (quality_score); its interval expands to span the whole merged group
+    [min t_start, max t_end] (ADR 0002 D6) so the represented range is never
+    lost. Only adjacent-in-time frames merge — two visually similar slides far
+    apart in the talk stay distinct.
+    """
+    if not candidates:
+        return []
+    if len(candidates) != len(hashes):
+        raise ValueError("candidates and hashes must be the same length")
+
+    order = sorted(range(len(candidates)), key=lambda i: candidates[i].timestamp_sec)
+    merged: list[FrameCandidate] = []
+    group_rep_hash = hashes[order[0]]
+    group = [candidates[order[0]]]
+    for i in order[1:]:
+        if phash_distance(group_rep_hash, hashes[i]) <= max_distance:
+            group.append(candidates[i])
+        else:
+            merged.append(_collapse_group(group))
+            group_rep_hash = hashes[i]
+            group = [candidates[i]]
+    merged.append(_collapse_group(group))
+    return merged
+
+
+def _collapse_group(group: list[FrameCandidate]) -> FrameCandidate:
+    """Collapse a near-dup group to its sharpest member with the spanned interval."""
+    rep = max(group, key=lambda c: c.quality_score)
+    rep.t_start = min(c.t_start for c in group)
+    rep.t_end = max(c.t_end for c in group)
+    # A group containing a scene boundary keeps that provenance on the survivor.
+    rep.is_scene_boundary = any(c.is_scene_boundary for c in group)
+    return rep
+
+
+def time_even_cut(
+    candidates: list[FrameCandidate], target: int
+) -> list[FrameCandidate]:
+    """Deterministic time-even cut to ~target frames.
+
+    Splits the candidate list (timestamp order) into `target` even buckets and
+    keeps the sharpest frame of each non-empty bucket. Pure + deterministic:
+    same input → same output. Every bucket that had a frame keeps one, so the
+    cut thins dense stretches instead of erasing sparse ones (coverage is
+    preserved — recall-first, ADR 0003 D5).
+    """
+    if target <= 0:
+        raise ValueError("target must be > 0")
+    if len(candidates) <= target:
+        return list(candidates)
+
+    ordered = sorted(candidates, key=lambda c: c.timestamp_sec)
+    kept: list[FrameCandidate] = []
+    n = len(ordered)
+    for b in range(target):
+        lo = b * n // target
+        hi = (b + 1) * n // target
+        bucket = ordered[lo:hi]
+        if bucket:
+            kept.append(max(bucket, key=lambda c: c.quality_score))
+    return kept
+
+
+def downsample_candidates(
+    candidates: list[FrameCandidate],
+    target: int = DOWNSAMPLE_TARGET_COUNT,
+) -> list[FrameCandidate]:
+    """CPU downsample stage (ADR 0002 D3): pHash merge then time-even cut.
+
+    Reads each candidate's pixels once to hash it; otherwise pure (no mutation
+    of dropped candidates, no other I/O). Frames whose image cannot be read are
+    dropped (they cannot feed the VLM anyway). Returns the kept candidates
+    sorted by timestamp_sec.
+
+    Coverage guarantee (recall-first, ADR 0003 D5): any timeline section that
+    was represented after the merge is still represented after the cut — the
+    repair pass re-adds the sharpest merged frame of a lost section, slightly
+    overshooting `target` rather than ever blanking a decile.
+    """
+    hashable: list[FrameCandidate] = []
+    hashes: list[int] = []
+    for c in candidates:
+        img = cv2.imread(str(c.path))
+        if img is None:
+            continue
+        hashable.append(c)
+        hashes.append(compute_phash(img))
+
+    merged = merge_near_duplicates(hashable, hashes)
+    kept = time_even_cut(merged, target)
+
+    # Coverage repair: never let the cut blank a section the merge still covered.
+    kept_sections = {c.section_index for c in kept}
+    for c in sorted(merged, key=lambda c: -c.quality_score):
+        if c.section_index not in kept_sections:
+            kept.append(c)
+            kept_sections.add(c.section_index)
+
+    return sorted(kept, key=lambda c: c.timestamp_sec)
+
+
+# ----------------------------------------------------------------
+# Persistence helpers
+# ----------------------------------------------------------------
+
+def format_interval_filename(
+    idx: int, t_start: float, t_end: float, suffix: str = JPEG_SUFFIX
+) -> str:
+    """Interval filename per ADR 0002 D6: keyframe_{idx}_[MMmSSs-MMmSSs].jpeg.
+
+    ':' is illegal on Windows → MMmSSs; '-' separates the bounds (not '~').
+    """
+    return f"keyframe_{idx:04d}_[{_mmss(t_start)}-{_mmss(t_end)}]{suffix}"
+
+
+def _mmss(t_sec: float) -> str:
+    """Format seconds as zero-padded MMmSSs (minutes may exceed 99)."""
+    total = int(round(t_sec))
     minutes, seconds = divmod(total, 60)
-    name = f"keyframe_{total:09d}_{minutes:02d}m{seconds:02d}s_gapfill.jpg"
-    dst = out_dir / name
-    if not cv2.imwrite(str(dst), frame):
-        return None
-    return dst
+    return f"{minutes:02d}m{seconds:02d}s"
 
+
+def _rename_with_interval(
+    frame_path: Path, idx: int, t_start: float, t_end: float
+) -> Path:
+    """Rename a kept frame to the D6 interval format; never hard-fails."""
+    new_path = frame_path.with_name(
+        format_interval_filename(idx, t_start, t_end, frame_path.suffix)
+    )
+    if new_path == frame_path:
+        return frame_path
+    try:
+        frame_path.rename(new_path)
+        return new_path
+    except OSError:
+        return frame_path
+
+
+# ----------------------------------------------------------------
+# Shared helpers (carried over)
+# ----------------------------------------------------------------
 
 def _get_video_duration(video_path: Path) -> float:
-    """Get video duration in seconds."""
+    """Get video duration in seconds (frame count / fps)."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Failed to open video: {video_path}")
@@ -244,220 +516,8 @@ def _get_video_duration(video_path: Path) -> float:
     return frame_count / fps
 
 
-def _patch_katna_empty_cluster() -> None:
-    """Guard Katna against the empty-cluster crash on low-variety video.
-
-    Katna selects keyframes by KMeans(n_clusters=N) over per-frame grayscale
-    histograms. On a static/low-variety video (e.g. a lecture slide deck) many
-    histograms are near-identical, so KMeans produces fewer than N distinct
-    clusters; the empty cluster's index array is empty and Katna's
-    __get_best_images_index_from_each_cluster__ calls np.argmax([]) → ValueError
-    ("attempt to get argmax of an empty sequence"). We monkeypatch that method to
-    skip empty clusters (returning fewer frames than requested — the honest
-    outcome). Behaviour for non-empty clusters is byte-for-byte identical.
-
-    The target name ends in "__" → it is a dunder-style name and is NOT
-    name-mangled, so we assign to the literal attribute.
-    """
-    try:
-        # Capital "Katna" — the canonical package name. Lowercase resolves on
-        # case-insensitive macOS but ImportErrors on case-sensitive Linux prod.
-        from Katna.image_selector import ImageSelector
-    except ImportError:
-        return
-
-    if getattr(ImageSelector, "_slidegen_empty_cluster_patched", False):
-        return
-
-    def _patched_best_index(self, files, files_clusters_index_array):
-        filtered = []
-        for cluster_i in np.arange(len(files_clusters_index_array)):
-            curr_row = files_clusters_index_array[cluster_i][0]
-            if len(curr_row) == 0:  # the guard upstream lacks
-                continue
-            n_images = np.arange(len(curr_row))
-            variance_laplacians = self._ImageSelector__get_laplacian_scores(
-                files, n_images
-            )
-            filtered.append(curr_row[np.argmax(variance_laplacians)])
-        return filtered
-
-    ImageSelector.__get_best_images_index_from_each_cluster__ = _patched_best_index
-    ImageSelector._slidegen_empty_cluster_patched = True
-
-
-def _run_katna(video_path: Path, target_count: int) -> list[Path]:
-    """Run Katna to extract keyframes. Returns list of persistent frame paths.
-
-    Katna writes into a scratch directory; we copy the frames into a persistent
-    temp dir BEFORE that scratch dir is cleaned up. Returning paths from inside
-    the `with tempfile.TemporaryDirectory()` block yields dangling paths once the
-    directory is deleted on function return (the caller would read missing files
-    → cv2.imread None → quality_score 0.0, silently). The caller owns cleanup of
-    the returned directory.
-    """
-    try:
-        # Capital "Katna" — the canonical package name. Lowercase resolves on
-        # case-insensitive macOS but ImportErrors on case-sensitive Linux prod.
-        from Katna.video import Video
-        from Katna.writer import KeyFrameDiskWriter
-    except ImportError as e:
-        raise ImportError(
-            "Katna not installed. Install with: pip install katna"
-        ) from e
-
-    _patch_katna_empty_cluster()
-
-    out_dir = Path(tempfile.mkdtemp(prefix="slidegen_katna_"))
-    with tempfile.TemporaryDirectory() as tmpdir:
-        writer = KeyFrameDiskWriter(location=tmpdir)
-        vd = Video()
-
-        try:
-            vd.extract_video_keyframes(
-                no_of_frames=target_count,
-                file_path=str(video_path),
-                writer=writer,
-            )
-        except Exception as e:
-            raise RuntimeError(f"Katna extraction failed: {e}") from e
-
-        # Copy extracted frames out of the scratch dir before it is deleted.
-        # Katna's output extension varies by version, so glob several.
-        persisted: list[Path] = []
-        srcs: list[Path] = []
-        for pattern in _KATNA_GLOBS:
-            srcs.extend(Path(tmpdir).glob(pattern))
-        for src in sorted(srcs):
-            dst = out_dir / src.name
-            shutil.copyfile(src, dst)
-            persisted.append(dst)
-        return persisted
-
-
-def _descriptor(bgr: np.ndarray) -> np.ndarray:
-    """Small grayscale fingerprint used for frame-to-frame MSE matching."""
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    return cv2.resize(gray, (DESC_SIZE, DESC_SIZE)).astype(np.float32)
-
-
-def _mse(a: np.ndarray, b: np.ndarray) -> float:
-    return float(np.mean((a - b) ** 2))
-
-
-def _build_video_index(video_path: Path) -> list[tuple[float, np.ndarray]]:
-    """Build a (timestamp_sec, descriptor) index via ONE sequential decode pass.
-
-    Reads the video forward only — no seeking — sampling roughly every
-    INDEX_STEP_SEC. Forward decode is deterministic and survives corrupt/partial
-    files where cap.set(POS_MSEC) returns wrong frames. Timestamps come from the
-    decoded frame's own position (POS_MSEC), falling back to frame_index / fps.
-    """
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Failed to open video: {video_path}")
-
-    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
-    stride = max(1, int(round(fps * INDEX_STEP_SEC))) if fps > 0 else 1
-
-    index: list[tuple[float, np.ndarray]] = []
-    frame_i = 0
-    while True:
-        if frame_i % stride == 0:
-            # Sampled frame: fully decode (grab + retrieve).
-            ok, frame = cap.read()
-            if not ok:
-                break
-            pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
-            t = pos_ms / 1000.0 if pos_ms > 0 else (frame_i / fps if fps > 0 else 0.0)
-            index.append((round(t, 2), _descriptor(frame)))
-        else:
-            # Skipped frame: grab() advances the decoder WITHOUT the (expensive)
-            # pixel retrieve, so we don't decode ~every frame just to sample a
-            # few. Still forward-only → deterministic on corrupt/partial files.
-            if not cap.grab():
-                break
-        frame_i += 1
-    cap.release()
-    return index
-
-
-def _recover_timestamps(
-    video_path: Path,
-    frame_paths: list[Path],
-    duration: float,
-) -> dict[Path, float]:
-    """Recover the true timestamp (seconds) of each Katna keyframe.
-
-    Katna filenames carry only an extraction index, so we build a fingerprint
-    index of the source video by a single forward decode pass and match each
-    keyframe to its nearest-MSE sample. Returns {frame_path: timestamp_sec};
-    frames that cannot be read are omitted. Note: on visually repetitive video
-    (e.g. near-identical slides) the match resolves to the correct slide's time
-    range, which is the intended granularity.
-    """
-    if not frame_paths or duration <= 0:
-        return {}
-
-    index = _build_video_index(video_path)
-    result: dict[Path, float] = {}
-    if not index:
-        return result
-
-    for fp in frame_paths:
-        img = cv2.imread(str(fp))
-        if img is None:
-            continue
-        d = _descriptor(img)
-        best_t, _ = min(index, key=lambda c: _mse(d, c[1]))
-        result[fp] = best_t
-    return result
-
-
-def _rename_with_timestamp(frame_path: Path, timestamp_sec: float) -> Path:
-    """Rename a keyframe so its filename encodes the recovered timestamp.
-
-    Format: keyframe_<sec:09d>_<MM>m<SS>s<suffix>. The zero-padded integer
-    seconds keeps filenames timestamp-sortable AND lets _extract_timestamp read
-    the time back; the MMmSSs part is human/VLM readable. Returns the new path
-    (or the original if the rename fails — recovery must never hard-fail).
-    """
-    total = int(round(timestamp_sec))
-    minutes, seconds = divmod(total, 60)
-    new_name = f"keyframe_{total:09d}_{minutes:02d}m{seconds:02d}s{frame_path.suffix}"
-    new_path = frame_path.with_name(new_name)
-    if new_path == frame_path:
-        return frame_path
-    try:
-        frame_path.rename(new_path)
-        return new_path
-    except OSError:
-        return frame_path
-
-
-def _scene_boundaries(video_path: Path) -> list[float]:
-    """Detect scene boundaries using PySceneDetect. Returns list of timestamps (sec)."""
-    try:
-        # PySceneDetect 0.6+ high-level API. The legacy VideoManager/SceneManager
-        # boilerplate was removed; detect() wraps open_video + SceneManager.
-        from scenedetect import ContentDetector, detect
-    except ImportError:
-        # If scenedetect not available, return empty list (no reinforcement)
-        return []
-
-    try:
-        scene_list = detect(
-            str(video_path), ContentDetector(threshold=SCENE_DETECT_THRESHOLD)
-        )
-        # Each scene is a (start, end) timecode pair; take each scene's start.
-        return [scene[0].get_seconds() for scene in scene_list]
-    except Exception:
-        # On any error, return empty list (no reinforcement, but don't fail)
-        return []
-
-
 def _laplacian_score(img_path: Path) -> float:
-    """Compute Laplacian variance (sharpness score) for an image."""
+    """Compute Laplacian variance (sharpness score) for an image, 0.0–1.0."""
     img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         return 0.0
@@ -465,16 +525,3 @@ def _laplacian_score(img_path: Path) -> float:
     var = cv2.Laplacian(img, cv2.CV_64F).var()
     # Normalize: 0-LAPLACIAN_NORM range → 0.0-1.0 (empirical upper bound)
     return min(var / LAPLACIAN_NORM, 1.0)
-
-
-def _extract_timestamp(filename: str) -> float | None:
-    """Read the timestamp (seconds) back from a timestamp-encoded filename.
-
-    Filenames are encoded by _rename_with_timestamp as
-    'keyframe_<sec>_<MM>m<SS>s.jpg'; the leading numeric group is the seconds.
-    Returns None if the name carries no number.
-    """
-    match = re.search(r"(\d+)", filename)
-    if match:
-        return float(match.group(1))
-    return None

@@ -1,8 +1,8 @@
 # CV pipeline
 yt-dlp>=2024.1
 opencv-python>=4.9
+# Stage-1 PRIMARY extractor (ADR 0002 D1). Katna retired by the same decision.
 scenedetect[opencv]>=0.6
-katna>=0.9
 pillow>=10.0
 # Semantic routing VLM (local, Apple Silicon via MLX) — ADR 0001. Replaces CLIP.
 # Apple-Silicon-only runtime; skipped on the Linux CI runner (tests mock it).
