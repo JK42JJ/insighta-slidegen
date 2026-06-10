@@ -1,0 +1,4 @@
+# Vendored insighta-visual-deck chain (ADR 0003 D7) — byte-stable, never reformat.
+deck/
+py/deck_tools/figures.py
+py/deck_tools/validate_deck.py

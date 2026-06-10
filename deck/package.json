@@ -1,0 +1,14 @@
+{
+  "name": "insighta-visual-deck",
+  "version": "1.0.0",
+  "description": "Vendored insighta-visual-deck chain (ADR 0003 D7): pptxgenjs template/recipe deck builder + validator harness. Vendored as-is — do not rewrite (byte-stable layout code).",
+  "private": true,
+  "main": "scripts/insighta_deck.js",
+  "type": "commonjs",
+  "scripts": {
+    "selfcheck": "bash scripts/selfcheck.sh"
+  },
+  "dependencies": {
+    "pptxgenjs": "^3.12.0"
+  }
+}
