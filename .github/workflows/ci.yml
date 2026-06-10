@@ -88,6 +88,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The CV-service dependency set (torch + paddle + CV stacks) overflows the
+      # default runner disk (observed: pip "OSError: [Errno 28] No space left on
+      # device", 2026-06-10). Drop unused preinstalled toolchains (~25-30 GB).
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -96,6 +105,13 @@ jobs:
           cache-dependency-path: |
             py/requirements*.txt
             mac-mini/slidegen-service/requirements*.txt
+
+      # CI runs lint + mocked tests only — CUDA wheels (several GB of
+      # nvidia-*-cu12) are pure waste here. Pre-installing the CPU build means
+      # the transitive `torch` requirement is already satisfied, so the
+      # requirements install never pulls the CUDA variant.
+      - name: Pre-install CPU-only torch
+        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install py/ deps
         # requirements.txt may not exist yet; tolerate missing file gracefully.
