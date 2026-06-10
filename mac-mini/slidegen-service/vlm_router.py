@@ -9,10 +9,15 @@ backend selected by the SLIDEGEN_VLM_BACKEND env var:
     transformers           — HuggingFace transformers (CUDA or CPU). Kaggle GPU
                              eval sandbox; also a non-Apple prod option.
     mlx                    — mlx_vlm on Apple Silicon. prod + Mac eval (ADR D9).
+    http                   — Qwen3-VL behind vLLM (OpenAI-compatible), call
+                             shape A of CONTRACT_model-endpoints v1.0 §2.
+                             OPT-IN ONLY (§5) — never reachable unless this
+                             env var is explicitly set to "http".
 
 `new env default = existing behavior`: unset → mock, so nothing runs a heavy
 model unless explicitly opted in. The LLM-API ban is upheld — every backend is
-a local open-weights model, never an API call.
+a self-hosted open-weights model (local process or our own vLLM endpoint,
+contract §2.3); never an Anthropic/OpenRouter API call.
 
 Each backend returns one routing dict per input frame, in input order, matching
 the ADR 0001 routing JSON contract:
@@ -25,9 +30,12 @@ backend output as plain dicts avoids a circular import with typing_select.
 
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import os
 import re
+from pathlib import Path
 from typing import Protocol
 
 from frames import FrameCandidate
@@ -219,10 +227,57 @@ class MLXBackend:
         return parse_routing_response(text, candidates)
 
 
+# Fallback MIME type for frame images whose suffix is unknown (frames.py writes JPEGs).
+_DEFAULT_IMAGE_MIME = "image/jpeg"
+
+
+def _image_data_url(path: Path) -> str:
+    """Encode a local frame file as a data URL for an OpenAI-style image part.
+
+    The router runs against locally extracted frames, so the vLLM host cannot
+    fetch them; a data URL keeps call shape A intact (image_url parts, contract
+    §2.1). PR-F orchestration passes presigned S3 GET URLs (§4) to
+    VlmHttpClient directly instead.
+    """
+    mime = mimetypes.guess_type(str(path))[0] or _DEFAULT_IMAGE_MIME
+    encoded = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+class HttpBackend:
+    """vLLM OpenAI-compatible endpoint — contract call shape A (§2.2 mode A).
+
+    Live calls are impossible without explicit opt-in: get_backend() only
+    reaches this class when SLIDEGEN_VLM_BACKEND=http is set (unset → mock,
+    unchanged), and VlmHttpClient.from_env enforces the §5 dev-mode refusal.
+    """
+
+    def __init__(self, model: str = DEFAULT_MODEL, client=None) -> None:
+        self.model = model
+        self._client = client  # injectable for tests (in-process stub transport)
+
+    def _ensure_client(self):
+        if self._client is None:
+            from model_clients import VlmHttpClient
+
+            self._client = VlmHttpClient.from_env(model=self.model)
+        return self._client
+
+    def route(self, candidates: list[FrameCandidate]) -> list[dict]:
+        if not candidates:
+            return []
+        client = self._ensure_client()
+        image_urls = [_image_data_url(c.path) for c in candidates]
+        prompt = build_routing_prompt(len(candidates))
+        raw = client.select_and_classify(image_urls, prompt)
+        return [_normalize(r, c) for r, c in zip(raw, candidates)]
+
+
 _BACKENDS = {
     "mock": MockBackend,
     "transformers": TransformersBackend,
     "mlx": MLXBackend,
+    "http": HttpBackend,
 }
 
 
