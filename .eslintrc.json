@@ -51,7 +51,8 @@
     "node_modules",
     "coverage",
     "*.config.js",
-    "*.config.ts"
+    "*.config.ts",
+    "deck"
   ],
   "overrides": [
     {
