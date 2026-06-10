@@ -28,6 +28,16 @@
 > removed; the VLM family is **Qwen3-VL** (not CLIP, not Qwen2.5-VL). The diagram
 > and Run-Location rows below are retained for historical context only; see ADR 0002
 > (and `cv_pipeline_v3_caption_context.svg` / `stage5_routing_v3.svg`).
+>
+> **Further amended by [ADR 0003 — Single-video MVP](../adr/0003-mvp-pptx-output-and-prod-llm-extraction.md) (2026-06-10)**:
+> output is **`.pptx`** via the vendored visual-deck chain (Google Slides +
+> vector PDF deferred); synthesis is the **slide-content LLM inside a
+> deterministic harness** on the prod service path (Sonnet via OpenRouter; dev/
+> test = stubs / CC console — API ban there unchanged); the equation expert is
+> **Qwen3-VL OCR + confidence gate** for MVP (UniMERNet deferred behind a
+> measurement); acquire runs on the **Mac Mini residential-egress proxy** (never
+> datacenter IPs). The `slide_oauth_tokens` / `slide_job_log` tables and the
+> Google-Slides sequence in §5 below are part of the deferred track.
 
 ```mermaid
 graph TD
@@ -95,6 +105,12 @@ graph TD
 > The v3 stack runs PySceneDetect, DocLayout-YOLO, a CPU pHash+time-even downsample,
 > **Qwen3-VL** (select+classify, caption context), UniMERNet, and PaddleOCR. Prod
 > inference is **A100/RunPod** (the Mac Mini host remains the dev/test local path).
+> Per [ADR 0003](../adr/0003-mvp-pptx-output-and-prod-llm-extraction.md): the Mac
+> Mini additionally serves as the **acquire proxy** (video download never runs on
+> datacenter IPs); the *Google Slides assembly* / *Vector PDF compositor* rows are
+> the deferred track (MVP output is `.pptx` built by the vendored visual-deck
+> chain + `validate_deck.py`); and the slide-content LLM (Sonnet via OpenRouter)
+> runs on the prod service path only, inside the deterministic harness.
 
 | Component | Host | Language / Runtime | Network |
 |---|---|---|---|
@@ -215,6 +231,13 @@ The Mac Mini CV host produces a figure manifest JSON document after completing a
 ---
 
 ## 5. Single Deck Build — Sequence Diagram
+
+> ⚠️ **Deferred track (v0.1, Google Slides)** — per
+> [ADR 0003](../adr/0003-mvp-pptx-output-and-prod-llm-extraction.md), the MVP
+> build sequence is: acquire (Mac Mini proxy) → CV stages 1–6 (ADR 0002) →
+> resource bundle → slide-content LLM in the harness → buildRecipe →
+> `validate_deck.py` FAIL-feedback loop → `.pptx` + appendix. The Google-Slides
+> sequence below applies only to the deferred output track.
 
 ```mermaid
 sequenceDiagram

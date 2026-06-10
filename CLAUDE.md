@@ -41,14 +41,20 @@ Load on every session start (`/init`): `MEMORY.md`, `work-efficiency.md`,
   `slide_slides`, `slide_figures`, `slide_keyframes`, `slide_jobs`.
 - Any write path touching a non-`slide_*` table is a bug — block it.
 
-### 🚨 LLM API call ban (inherited VERBATIM — no exceptions)
-- **Direct Anthropic API calls are banned** (Messages + Batch).
-- **OpenRouter API calls are banned.**
-- These APIs are **production-service only**. Dataset generation, experiments,
-  and tests must NOT call them. No "credit check", "small test", "just 1",
-  or "sample" exemptions.
-- **Slide-planning reasoning runs in the CC console via the Write tool**, using
-  Claude's own knowledge — NOT via an LLM API call from a script.
+### 🚨 LLM API call ban — dev/test (inherited, no exceptions) + prod boundary (ADR 0003)
+- These APIs are **production-service only** (inherited rule). In **dev, test,
+  CI, dataset generation, and experiments**, direct Anthropic API calls
+  (Messages + Batch) and OpenRouter API calls are **banned**. No "credit
+  check", "small test", "just 1", or "sample" exemptions.
+- **Prod service path (ADR 0003 D2)**: the deployed pipeline may call the
+  slide-content LLM (Claude Sonnet via OpenRouter) **only inside the
+  deterministic harness** (extract → buildRecipe → validate → FAIL feedback).
+  The LLM is **injected**; it never gets agentic tool use and never writes code.
+- `OPENROUTER_API_KEY` is **prod-only** (like the vision keys): never in a
+  dev/test `.env`, never in CI. Config must refuse it when `SLIDEGEN_MODE=dev`.
+- **Dev/test slide-planning runs in the CC console via the Write tool**
+  (stub / console-authored content-JSON fixtures) — NOT via an LLM API call
+  from a script.
 - The **only** sanctioned vision API usage is the **prod-only** fallback
   (`VISION_API_PROVIDER` set, `SLIDEGEN_MODE=prod`) when the Mac Mini CV
   service is unavailable. Dev/test paths are **local-first** (Mac Mini CV
@@ -75,10 +81,12 @@ Load on every session start (`/init`): `MEMORY.md`, `work-efficiency.md`,
   Prisma schema and the DB are in sync.
 
 ### 🎨 Figures: vector-300dpi quality gate
-- Figures are **redrawn as native vector graphics**, not screenshots.
-- Quality gate before shipping a figure: the figure must be true vector
-  (selectable/scalable) and rasterized embeds must be **≥ 300 dpi**. A
-  screenshot-only or sub-300-dpi figure fails the gate.
+- Figures are **regenerated from extracted data**, never pasted raw frames.
+  A snapshot is a data source, not the artifact (ADR 0003 P2).
+- Quality gate before shipping a figure: structures (tables/trees/flows) as
+  native editable vector objects; rasterized embeds (e.g. matplotlib data
+  graphs) must be **≥ 300 dpi**; equations as text/LaTeX-derived rendering. A
+  screenshot-only or sub-300-dpi figure fails the gate (ADR 0003 D1).
 
 ---
 
