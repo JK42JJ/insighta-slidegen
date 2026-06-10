@@ -67,6 +67,21 @@ Load on every session start (`/init`): `MEMORY.md`, `work-efficiency.md`,
   user approval ("ok" / "해" / "approved"). Proposal/question forms are not
   approval. Read-only commands (`ls`, `grep`, `git status`) need no plan.
 
+### 🚫 PR merge is human-only — CC merge ban (NO EXCEPTIONS)
+- Claude Code must **NEVER** execute `gh pr merge` in any form — including
+  `--merge` / `--squash` / `--rebase` / `--auto`, enabling GitHub auto-merge,
+  or merging via the GitHub API. **Merging is the repo owner's manual action
+  only**, even when CI is green and no review requirement is configured.
+- A terse acknowledgment ("ci done", "ok next") or an upstream "proceed with
+  the PR" instruction is **NOT** merge approval. After creating a PR: report
+  the URL + CI status and **STOP**.
+- **Background / watch / scheduled tasks are read-only**: no side effects
+  (merge, push, deploy, DDL) inside monitors, CI-watch loops, or cron jobs.
+  Watch → report → stop.
+- (Origin: 2026-06-10, PR #15 — merged by CC on an inferred go-ahead. Doc-only,
+  no damage; the rule exists so the same pattern can never reach a DDL or
+  deploy PR.)
+
 ### 🧱 DB work order — local-first + raw SQL DDL (NO `prisma db push`)
 - **Local → production order. No exceptions.**
 - **Do NOT use `prisma db push`** for schema changes (it silent-fails on the
