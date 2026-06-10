@@ -1,0 +1,548 @@
+"""HTTP clients for the GPU model-serving endpoints.
+
+Authority: docs/CONTRACT_model-endpoints.md v1.0 (referenced below as "§n").
+
+    VlmHttpClient  — Qwen3-VL behind vLLM, OpenAI-compatible chat.completions (§2).
+                     The three sanctioned call shapes (§2.2) map to methods:
+                       A — select_and_classify()  (stage 4, per BGE-M3 window)
+                       B — classify_crop()        (stage 5, per YOLO crop)
+                       C — equation_ocr()         (stage 5, equation crop)
+    YoloHttpClient — DocLayout-YOLO custom FastAPI: POST /detect + GET /health (§3).
+
+Both endpoints serve **self-hosted open-weights models** — these calls are NOT
+LLM-API-ban scoped; the ban (ADR 0003 D2) governs Anthropic/OpenRouter only
+(§2.3). Prompt CONTENTS for modes A/B/C are PR-F scope (§7) — callers pass the
+prompt in; this module owns only the wire contract.
+
+Gating (§5): `from_env()` refuses live-endpoint tokens when SLIDEGEN_MODE=dev
+(the default) unless SLIDEGEN_VLM_BACKEND=http was explicitly opted into —
+mirrors the VISION_API_PROVIDER gating in src/config/index.ts. Tests construct
+clients directly against in-process stubs (httpx.MockTransport): no env, no
+network, no GPU (§6).
+
+Coordinates NEVER come from Qwen (grounding hallucination, ADR 0002 D2 / §2.2):
+the pydantic response models use extra="ignore", so any bbox/coordinate key in
+a Qwen response is silently dropped. Box geometry is YOLO's job alone.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import time
+from collections.abc import Callable, Mapping
+from typing import Any
+
+import httpx
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+# ── Env key names (§5 — NAMES only; values live in .env / GitHub Secrets) ────
+ENV_MODE = "SLIDEGEN_MODE"
+ENV_VLM_BACKEND = "SLIDEGEN_VLM_BACKEND"  # mirrors vlm_router.ENV_BACKEND (no import: avoids cycle)
+ENV_VLM_BASE_URL = "SLIDEGEN_VLM_BASE_URL"
+ENV_VLM_TOKEN = "SLIDEGEN_VLM_TOKEN"
+ENV_VLM_MODEL = "SLIDEGEN_VLM_MODEL"
+ENV_YOLO_BASE_URL = "SLIDEGEN_YOLO_BASE_URL"
+ENV_YOLO_TOKEN = "SLIDEGEN_YOLO_TOKEN"
+
+# Backend name that opts into live HTTP endpoints (§5); anything else = no live calls.
+HTTP_BACKEND_NAME = "http"
+# Unset SLIDEGEN_MODE is dev (fail-closed): live tokens are refused by default.
+DEFAULT_MODE = "dev"
+
+# ── Operational defaults (§2.3 / §3.2 — tuning knobs, not secrets) ───────────
+DEFAULT_TIMEOUT_SEC = 120.0  # §2.3 initial per-call budget
+MAX_RETRIES = 2  # §2.3 max retries on 429/5xx/network
+BACKOFF_BASE_SEC = 1.0  # exponential backoff: BACKOFF_BASE_SEC * 2**attempt
+STATUS_TOO_MANY_REQUESTS = 429
+STATUS_SERVER_ERROR_MIN = 500
+
+DEFAULT_CONF_THRESHOLD = 0.15  # §3.2 LOW default = over-detect (ADR 0002 D2, recall-first)
+DEFAULT_MAX_BOXES = 50  # §3.2 optional guard
+
+ROUTING_TEMPERATURE = 0.0  # §2.1 — temperature 0 for ALL routing/classification calls
+# §1 topology: Qwen3-VL-8B is the contract serving model (vlm_router keeps its
+# own local-backend default; this applies to from_env() construction only).
+DEFAULT_VLM_MODEL = "qwen3-vl-8b-instruct"
+
+# ── ADR 0004 §4 failure-stage attribution (§2.3 / §3.4) ──────────────────────
+STAGE_KEYFRAME = "keyframe"  # mode A failures
+STAGE_RECOGNIZE = "recognize"  # mode B/C failures
+STAGE_DETECT = "detect"  # YOLO failures
+
+# One re-ask retry on JSON parse/validation failure, then hard error (§2.1).
+# Generic corrective instruction — NOT a mode prompt (those are PR-F scope, §7).
+REASK_PROMPT = (
+    "Your previous reply was not the required JSON or did not match the "
+    "expected shape. Reply again with ONLY the JSON — no prose, no code fences."
+)
+
+
+# ── Errors ────────────────────────────────────────────────────────────────────
+class LiveConfigRefusedError(RuntimeError):
+    """Live-endpoint config present in dev mode without explicit http opt-in (§5)."""
+
+
+class ModelEndpointError(RuntimeError):
+    """A model-endpoint call failed; carries ADR 0004 §4 stage attribution."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: str,
+        status: int | None = None,
+        code: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.status = status
+        self.code = code
+
+
+class VlmContractError(ModelEndpointError):
+    """Qwen output failed the JSON contract even after the single re-ask (§2.1)."""
+
+
+# ── Response models (client-side validation, §2.1 / §3.3) ─────────────────────
+class RoutingDecision(BaseModel):
+    """Mode A per-frame output (ADR 0001 routing schema, unchanged — §2.2).
+
+    extra="ignore" drops any bbox/coordinate key Qwen may emit (§2.2: ignored).
+    Lenient defaults mirror vlm_router._normalize so a sparse-but-valid object
+    routes as a conservative non-slide instead of failing the whole window.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    is_slide: bool = False
+    contains_graph: bool = False
+    contains_equation: bool = False
+    frame_type: str = "b_roll"
+    summary_hint: str | None = None
+    confidence: float = 0.0
+
+
+class CropClassification(BaseModel):
+    """Mode B output: kind authority is Qwen, never YOLO's class (§2.2, ADR 0002 D2/D7)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    kind: str
+    struct: dict[str, Any] = Field(default_factory=dict)
+    confidence: float = 0.0
+
+
+class EquationOcr(BaseModel):
+    """Mode C output → slide_figures.extracted_latex / extraction_conf (§2.2, ADR 0003 D3)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    latex: str
+    confidence: float = 0.0
+
+
+class PixelBox(BaseModel):
+    """Source-frame PIXELS — same shape persisted to slide_figures.bbox (§3.3)."""
+
+    x: float
+    y: float
+    w: float
+    h: float
+
+
+class DetectedBox(BaseModel):
+    """One YOLO detection. `class` is ADVISORY ONLY — WHERE not WHAT (§3.3/§3.4).
+
+    The client carries it through untouched (logging/ADR 0004 stats only) and
+    MUST NOT branch on it; `kind` is decided by Qwen in mode B.
+    """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    bbox: PixelBox
+    cls: str = Field(alias="class")
+    score: float
+
+
+class ImageSize(BaseModel):
+    w: int
+    h: int
+
+
+class DetectResponse(BaseModel):
+    """POST /detect response (§3.3)."""
+
+    model_config = ConfigDict(extra="ignore", protected_namespaces=())
+
+    image: ImageSize
+    model_version: str
+    boxes: list[DetectedBox]
+
+
+class HealthResponse(BaseModel):
+    """GET /health response (§3.1)."""
+
+    model_config = ConfigDict(extra="ignore", protected_namespaces=())
+
+    status: str
+    model_version: str
+
+
+# ── §5 gating ─────────────────────────────────────────────────────────────────
+def assert_live_config_allowed(env: Mapping[str, str] | None = None) -> None:
+    """Refuse live-endpoint tokens in dev mode without explicit http opt-in (§5).
+
+    Mirrors the VISION_API_PROVIDER gating in src/config/index.ts: dev defaults
+    to mock/local, prod-only keys must never activate from a dev/test `.env`.
+    """
+    env = os.environ if env is None else env
+    mode = env.get(ENV_MODE, DEFAULT_MODE)
+    opted_in = env.get(ENV_VLM_BACKEND, "").lower() == HTTP_BACKEND_NAME
+    if mode == "prod" or opted_in:
+        return
+    live_keys = [key for key in (ENV_VLM_TOKEN, ENV_YOLO_TOKEN) if env.get(key)]
+    if live_keys:
+        raise LiveConfigRefusedError(
+            f"live model-endpoint token(s) {live_keys} are set but {ENV_MODE}="
+            f"{mode} without {ENV_VLM_BACKEND}={HTTP_BACKEND_NAME} opt-in — "
+            "live endpoints are prod/opt-in only (CONTRACT_model-endpoints §5)"
+        )
+
+
+# ── Shared transport helpers ──────────────────────────────────────────────────
+def _request_with_retry(
+    http: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str],
+    json_body: dict | None,
+    stage: str,
+    parse_error: Callable[[httpx.Response], tuple[str | None, str | None]],
+    max_retries: int,
+    backoff_base_sec: float,
+    sleep: Callable[[float], None],
+) -> httpx.Response:
+    """§2.3/§3.4 retry policy: max retries with exponential backoff on
+    429/5xx/network; NO retry on other 4xx contract errors."""
+    attempt = 0
+    while True:
+        try:
+            response = http.request(method, url, headers=headers, json=json_body)
+        except httpx.HTTPError as exc:
+            if attempt >= max_retries:
+                raise ModelEndpointError(
+                    f"{method} {url} network failure after {attempt + 1} attempt(s): {exc}",
+                    stage=stage,
+                ) from exc
+        else:
+            if response.status_code < 400:
+                return response
+            retryable = (
+                response.status_code == STATUS_TOO_MANY_REQUESTS
+                or response.status_code >= STATUS_SERVER_ERROR_MIN
+            )
+            if not retryable or attempt >= max_retries:
+                code, message = parse_error(response)
+                detail = f" [{code}] {message}" if (code or message) else ""
+                raise ModelEndpointError(
+                    f"{method} {url} -> HTTP {response.status_code}{detail}",
+                    stage=stage,
+                    status=response.status_code,
+                    code=code,
+                )
+        sleep(backoff_base_sec * 2**attempt)
+        attempt += 1
+
+
+def _openai_error(response: httpx.Response) -> tuple[str | None, str | None]:
+    """Extract (code, message) from the OpenAI error-JSON shape (§2.3)."""
+    try:
+        err = response.json().get("error") or {}
+        return err.get("code"), err.get("message")
+    except (ValueError, AttributeError):
+        return None, response.text[:200]
+
+
+def _yolo_error(response: httpx.Response) -> tuple[str | None, str | None]:
+    """Extract (code, message) from the YOLO error shape (§3.4)."""
+    try:
+        body = response.json()
+        return body.get("code"), body.get("message")
+    except (ValueError, AttributeError):
+        return None, response.text[:200]
+
+
+def _loads_json(text: str) -> Any:
+    """Strict JSON parse, tolerating only a markdown code fence around the JSON."""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return json.loads(cleaned)
+
+
+# ── Qwen3-VL client (§2) ─────────────────────────────────────────────────────
+class VlmHttpClient:
+    """Qwen3-VL behind vLLM — OpenAI-compatible chat.completions (§2).
+
+    Images are passed as `image_url` parts (presigned S3 GET URLs in prod, §4;
+    the serving host fetches them itself). All calls run at temperature 0 and
+    are JSON-only by prompt contract, validated client-side with ONE re-ask
+    retry on parse failure, then hard error (§2.1).
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        model: str = DEFAULT_VLM_MODEL,
+        *,
+        timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+        max_retries: int = MAX_RETRIES,
+        backoff_base_sec: float = BACKOFF_BASE_SEC,
+        transport: httpx.BaseTransport | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self._headers = {"Authorization": f"Bearer {token}"}
+        self._max_retries = max_retries
+        self._backoff_base_sec = backoff_base_sec
+        self._sleep = sleep
+        self._http = httpx.Client(
+            base_url=self.base_url, timeout=timeout_sec, transport=transport
+        )
+
+    @classmethod
+    def from_env(
+        cls, env: Mapping[str, str] | None = None, **kwargs: Any
+    ) -> "VlmHttpClient":
+        """Construct from §5 env keys; enforces the dev-mode live-config refusal."""
+        env = os.environ if env is None else env
+        assert_live_config_allowed(env)
+        base_url = env.get(ENV_VLM_BASE_URL)
+        if not base_url:
+            raise LiveConfigRefusedError(f"{ENV_VLM_BASE_URL} is not set")
+        model = kwargs.pop("model", None) or env.get(ENV_VLM_MODEL) or DEFAULT_VLM_MODEL
+        return cls(base_url, env.get(ENV_VLM_TOKEN, ""), model, **kwargs)
+
+    def close(self) -> None:
+        self._http.close()
+
+    # — Mode A: select + classify (one batched call per BGE-M3 window, §2.2) —
+    def select_and_classify(
+        self,
+        image_urls: list[str],
+        prompt: str,
+        captions_text: str | None = None,
+    ) -> list[dict]:
+        """One routing dict per frame, in input order (ADR 0001 schema).
+
+        Failure attribution: stage `keyframe` (§2.3 / ADR 0004 §4).
+        """
+        parts: list[dict] = [
+            {"type": "image_url", "image_url": {"url": url}} for url in image_urls
+        ]
+        if captions_text:
+            parts.append({"type": "text", "text": captions_text})
+        parts.append({"type": "text", "text": prompt})
+
+        expected = len(image_urls)
+
+        def parse(text: str) -> list[dict]:
+            data = _loads_json(text)
+            if not isinstance(data, list):
+                raise ValueError("mode A output must be a JSON array")
+            if len(data) != expected:
+                raise ValueError(
+                    f"mode A output must have one object per frame "
+                    f"(expected {expected}, got {len(data)})"
+                )
+            return [RoutingDecision.model_validate(obj).model_dump() for obj in data]
+
+        return self._chat_json(parts, stage=STAGE_KEYFRAME, parse=parse)
+
+    # — Mode B: per-crop kind + struct-JSON (§2.2) —
+    def classify_crop(
+        self,
+        image_url: str,
+        prompt: str,
+        caption_slice: str | None = None,
+    ) -> dict:
+        """{kind, struct, confidence} for one YOLO crop. kind authority is Qwen,
+        never YOLO's class (ADR 0002 D2/D7). Stage: `recognize`."""
+        parts: list[dict] = [{"type": "image_url", "image_url": {"url": image_url}}]
+        if caption_slice:
+            parts.append({"type": "text", "text": caption_slice})
+        parts.append({"type": "text", "text": prompt})
+
+        def parse(text: str) -> dict:
+            return CropClassification.model_validate(_loads_json(text)).model_dump()
+
+        return self._chat_json(parts, stage=STAGE_RECOGNIZE, parse=parse)
+
+    # — Mode C: equation OCR (§2.2) —
+    def equation_ocr(self, image_url: str, prompt: str) -> dict:
+        """{latex, confidence} for an equation crop. Low confidence FLAGS, never
+        silently embeds (ADR 0003 D3) — flagging is the caller's job; this
+        client only validates and returns. Stage: `recognize`."""
+        parts = [
+            {"type": "image_url", "image_url": {"url": image_url}},
+            {"type": "text", "text": prompt},
+        ]
+
+        def parse(text: str) -> dict:
+            return EquationOcr.model_validate(_loads_json(text)).model_dump()
+
+        return self._chat_json(parts, stage=STAGE_RECOGNIZE, parse=parse)
+
+    # — internals —
+    def _chat_json(
+        self, parts: list[dict], *, stage: str, parse: Callable[[str], Any]
+    ) -> Any:
+        messages = [{"role": "user", "content": parts}]
+        text = self._completion_text(messages, stage=stage)
+        try:
+            return parse(text)
+        except (ValueError, ValidationError) as first_error:
+            # ONE re-ask retry on parse/validation failure, then hard error (§2.1).
+            reask_messages = messages + [
+                {"role": "assistant", "content": text},
+                {"role": "user", "content": REASK_PROMPT},
+            ]
+            reask_text = self._completion_text(reask_messages, stage=stage)
+            try:
+                return parse(reask_text)
+            except (ValueError, ValidationError) as second_error:
+                raise VlmContractError(
+                    f"VLM output failed the JSON contract after one re-ask: {second_error}",
+                    stage=stage,
+                ) from first_error
+
+    def _completion_text(self, messages: list[dict], *, stage: str) -> str:
+        payload = {
+            "model": self.model,
+            "temperature": ROUTING_TEMPERATURE,  # §2.1 — always 0
+            "messages": messages,
+        }
+        response = _request_with_retry(
+            self._http,
+            "POST",
+            "/v1/chat/completions",
+            headers=self._headers,
+            json_body=payload,
+            stage=stage,
+            parse_error=_openai_error,
+            max_retries=self._max_retries,
+            backoff_base_sec=self._backoff_base_sec,
+            sleep=self._sleep,
+        )
+        data = response.json()
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise VlmContractError(
+                f"malformed chat.completions envelope: {exc}", stage=stage
+            ) from exc
+        if not isinstance(content, str):
+            raise VlmContractError(
+                "chat.completions message content was not a string", stage=stage
+            )
+        return content
+
+
+# ── DocLayout-YOLO client (§3) ───────────────────────────────────────────────
+class YoloHttpClient:
+    """DocLayout-YOLO custom FastAPI: POST /detect + GET /health (§3).
+
+    Over-detect by default (LOW conf threshold): recall is the only
+    unrecoverable failure; Qwen cleans up false boxes downstream (§3.4).
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        *,
+        timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+        max_retries: int = MAX_RETRIES,
+        backoff_base_sec: float = BACKOFF_BASE_SEC,
+        transport: httpx.BaseTransport | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._headers = {"Authorization": f"Bearer {token}"}
+        self._max_retries = max_retries
+        self._backoff_base_sec = backoff_base_sec
+        self._sleep = sleep
+        self._http = httpx.Client(
+            base_url=self.base_url, timeout=timeout_sec, transport=transport
+        )
+
+    @classmethod
+    def from_env(
+        cls, env: Mapping[str, str] | None = None, **kwargs: Any
+    ) -> "YoloHttpClient":
+        """Construct from §5 env keys; enforces the dev-mode live-config refusal."""
+        env = os.environ if env is None else env
+        assert_live_config_allowed(env)
+        base_url = env.get(ENV_YOLO_BASE_URL)
+        if not base_url:
+            raise LiveConfigRefusedError(f"{ENV_YOLO_BASE_URL} is not set")
+        return cls(base_url, env.get(ENV_YOLO_TOKEN, ""), **kwargs)
+
+    def close(self) -> None:
+        self._http.close()
+
+    def detect(
+        self,
+        image_url: str,
+        conf_threshold: float = DEFAULT_CONF_THRESHOLD,
+        max_boxes: int = DEFAULT_MAX_BOXES,
+    ) -> DetectResponse:
+        """POST /detect (§3.2/§3.3). Boxes are returned exactly as detected —
+        `class` is advisory-only and never gates anything here (§3.4).
+        Failure attribution: stage `detect`."""
+        payload = {
+            "image_url": image_url,
+            "conf_threshold": conf_threshold,
+            "max_boxes": max_boxes,
+        }
+        response = self._request("POST", "/detect", json_body=payload)
+        try:
+            return DetectResponse.model_validate(response.json())
+        except (ValidationError, ValueError) as exc:
+            raise ModelEndpointError(
+                f"YOLO /detect response failed contract validation: {exc}",
+                stage=STAGE_DETECT,
+            ) from exc
+
+    def health(self) -> HealthResponse:
+        """GET /health (§3.1)."""
+        response = self._request("GET", "/health", json_body=None)
+        try:
+            return HealthResponse.model_validate(response.json())
+        except (ValidationError, ValueError) as exc:
+            raise ModelEndpointError(
+                f"YOLO /health response failed contract validation: {exc}",
+                stage=STAGE_DETECT,
+            ) from exc
+
+    def _request(
+        self, method: str, url: str, *, json_body: dict | None
+    ) -> httpx.Response:
+        return _request_with_retry(
+            self._http,
+            method,
+            url,
+            headers=self._headers,
+            json_body=json_body,
+            stage=STAGE_DETECT,
+            parse_error=_yolo_error,
+            max_retries=self._max_retries,
+            backoff_base_sec=self._backoff_base_sec,
+            sleep=self._sleep,
+        )
