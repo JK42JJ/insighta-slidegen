@@ -1,6 +1,6 @@
 # insighta-slidegen
 
-Convert an Insighta video card's v2 rich-summary into a Google Slides deck and a true-vector PDF — figures are redrawn as native vector graphics at 300 dpi, not screenshots.
+Convert an Insighta video card's v2 rich-summary into a typed **.pptx deck** — figures are **regenerated from extracted data** (native editable objects + ≥300 dpi data graphs), never pasted raw frames. See [ADR 0003](./docs/adr/0003-mvp-pptx-output-and-prod-llm-extraction.md) (output/synthesis) and [ADR 0002](./docs/adr/0002-pipeline-v3-cpu-downsample-caption-context.md) (CV pipeline). A Google Slides + true-vector-PDF output is a deferred additive track.
 
 > PUBLIC repo — essentials only (code, schema, IaC, contributor docs). No credentials, ops runbooks, user data, or prod metrics.
 
@@ -11,13 +11,16 @@ Convert an Insighta video card's v2 rich-summary into a Google Slides deck and a
 | Layer | Technology |
 |---|---|
 | Orchestrator | TypeScript (Node 20, `src/`) |
-| Slide compositor | Python `google-api-python-client` (`py/`) |
-| Vector PDF compositor | Python `reportlab` / LaTeX (`py/`) |
-| CV service (Mac Mini) | Python CLIP + YOLO + OCR (`mac-mini/slidegen-service/`) |
+| Deck builder | pptxgenjs template/recipe chain (`deck/`, vendored `insighta-visual-deck` — lands per ADR 0003 D7) |
+| Deck validator + teaching graphs | Python `validate_deck.py` / `figures.py` (matplotlib, `py/`) |
+| CV pipeline (per ADR 0002) | PySceneDetect → DocLayout-YOLO (boxes) → pHash downsample → Qwen3-VL select+classify → experts (`mac-mini/slidegen-service/`) |
+| Model serving | prod: cloud GPU host (Qwen3-VL-8B + DocLayout-YOLO); dev: local Mac Mini, same API surface (URL-only switch) |
+| Acquire (video download) | Mac Mini residential-egress proxy → S3 presigned (ADR 0003 D4 — never from datacenter IPs) |
+| Slide-content LLM | prod service path only: Claude Sonnet via OpenRouter, injected into the deterministic harness (ADR 0003 D2); dev/test: stubs / CC-console fixtures |
 | Data source | Insighta Supabase (read-only) |
 | Data sink | Slide metadata in Supabase `slide_*` tables (raw SQL DDL — no `prisma db push`) |
-| Slide output | Google Slides (300 dpi PNG embeds) |
-| PDF output | Track 1: Slides export (raster); Track 2: true-vector via LaTeX/reportlab |
+| Deck output | `.pptx` + Markdown appendix (validated by `validate_deck.py` before leaving the pipeline) |
+| Deferred track | Google Slides + true-vector PDF (`py/slides_build/` stubs retained) |
 | ORM | Prisma (`@prisma/client`) |
 
 ---
@@ -28,27 +31,21 @@ Convert an Insighta video card's v2 rich-summary into a Google Slides deck and a
 flowchart TD
     DB["Insighta Supabase (read-only)<br/>video card + v2 rich-summary"]
     ORCH["TS Orchestrator (src/)"]
-    CV["Mac Mini CV Service<br/>(local-first; vision API fallback in prod)"]
-    CLIP["CLIP / YOLO / OCR"]
-    REDRAW["Figure Redraw Engine (py/)"]
-    SVG["native SVG/PDF vectors 300 dpi"]
-    SLIDES_COMP["Google Slides Compositor (py/)"]
-    SLIDES_OUT["Google Slides deck<br/>(300 dpi PNG embeds)"]
-    PDF_COMP["Vector PDF Compositor (py/)"]
-    PDF_OUT["true-vector PDF<br/>(LaTeX / reportlab)"]
+    ACQ["Acquire — Mac Mini proxy<br/>yt-dlp → S3 presigned"]
+    CV["CV pipeline (ADR 0002)<br/>PySceneDetect → YOLO boxes → pHash downsample →<br/>Qwen3-VL select+classify (caption context) → experts"]
+    BUNDLE["Resource bundle (deterministic)<br/>segments · figureLabels · formulas · charts"]
+    LLM["Slide-content LLM (harness only)<br/>prod: Sonnet via OpenRouter · dev: stub/console"]
+    BUILD["buildRecipe (12–20 slides, no filler)<br/>→ validate_deck v2 → FAIL feedback loop"]
+    OUT[".pptx + appendix.md"]
 
     DB --> ORCH
-    ORCH --> CV
-    CV --> CLIP
-    ORCH --> REDRAW
-    REDRAW --> SVG
-    ORCH --> SLIDES_COMP
-    SLIDES_COMP --> SLIDES_OUT
-    ORCH --> PDF_COMP
-    PDF_COMP --> PDF_OUT
+    ORCH --> ACQ --> CV --> BUNDLE --> LLM --> BUILD --> OUT
+    CV -.persist keyframes/figures.-> DB2[("slide_* tables")]
+    BUILD -.persist deck/slides/jobs.-> DB2
 ```
 
-Pipeline is card-level v1: one card → one deck.
+Pipeline is card-level v1: one card → one deck. Figures are regenerated from
+extracted data (struct-JSON / LaTeX / OCR), never pasted raw frames (ADR 0003 P2).
 
 ---
 
@@ -70,7 +67,10 @@ cp .env.example .env
 # GOOGLE_OAUTH_* — see .env.example for all keys and comments.
 ```
 
-### Google OAuth setup
+### Google OAuth setup (deferred track only)
+
+> Only needed for the deferred Google Slides output track — the `.pptx` MVP
+> path (ADR 0003 D1) does not use Google APIs.
 
 1. Create a project in [Google Cloud Console](https://console.cloud.google.com/).
 2. Enable the **Google Slides API** and **Google Drive API**.
@@ -101,20 +101,26 @@ npm test
 ```
 insighta-slidegen/
 ├── src/                    # TypeScript orchestrator
-│   ├── cli/                # CLI entry point
-│   ├── pipeline/           # Card → slides orchestration
-│   ├── adapters/           # Supabase read / slide_* write
-│   └── config/             # Zod-validated env config
-├── py/                     # Python: Slides compositor + vector PDF
-│   ├── compositor/         # google-api-python-client slide builder
-│   ├── vector_pdf/         # LaTeX / reportlab PDF track
+│   ├── index.ts            # CLI entry point
+│   ├── config/             # Zod-validated env config (central process.env funnel)
+│   ├── resolve/            # card → youtube video id
+│   ├── fetch/              # v2 rich-summary fetch + gate (v2/pass/transcript_used)
+│   ├── cv/                 # CV service client (submit → poll → result)
+│   ├── plan/               # deterministic slide planning helpers
+│   ├── db/                 # slide_* repository (writes ONLY slide_* tables)
+│   └── types/              # Zod schemas / inferred contracts
+├── deck/                   # vendored insighta-visual-deck chain (pptxgenjs) — lands per ADR 0003 D7
+├── py/                     # Python: deck validator + teaching graphs
+│   ├── slides_build/       # deferred Google Slides / vector-PDF track (stubs)
 │   └── tests/
 ├── mac-mini/
-│   └── slidegen-service/   # CV service: CLIP + YOLO + OCR
+│   └── slidegen-service/   # CV service (ADR 0002) + acquire proxy (ADR 0003 D4)
 │       ├── Dockerfile
 │       └── tests/
 ├── prisma/
-│   └── schema.prisma       # Prisma schema (slide_* tables via raw SQL DDL)
+│   ├── schema.prisma       # Prisma schema (slide_* tables via raw SQL DDL)
+│   └── migrations/         # raw SQL DDL (no `prisma db push`)
+├── docs/adr/               # architecture decision records (0001 → 0002 → 0003)
 ├── tests/                  # Vitest unit tests
 ├── .env.example            # Key names only — copy to .env, fill values
 └── .github/workflows/

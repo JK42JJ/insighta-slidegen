@@ -1,6 +1,16 @@
 # ADR 0002 — Pipeline v3: CPU downsample + caption-context VLM routing
 
-**Status**: Accepted
+> ⚠️ **Amended by [ADR 0003 — Single-video MVP](./0003-mvp-pptx-output-and-prod-llm-extraction.md) (2026-06-10).**
+> The CV stages below (D1–D6, D8, D9) remain the accepted design. What §4 of this
+> ADR carried forward from 0001 is revised by 0003: **output** (Google Slides +
+> vector PDF → `.pptx` via the vendored visual-deck chain), **synthesis/LLM
+> boundary** (console-only → prod-path injected slide-LLM inside a deterministic
+> harness; dev/test ban unchanged), and the **equation expert** (UniMERNet
+> main-path → Qwen3-VL OCR + confidence gate, UniMERNet deferred behind a
+> measurement). 0003 also codifies the acquire host (residential-egress proxy),
+> the recall-first keyframing invariant, and the `slide_*` caption no-persist rule.
+
+**Status**: Accepted (amended by ADR 0003 — output / synthesis / equation expert / acquire)
 **Date**: 2026-06-09
 **Supersedes**: [ADR 0001](./0001-pipeline-v1-frame-selection-and-extraction.md) (v1: Katna → Qwen2.5-VL selection → conditional extraction).
 **Scope**: v1 design refresh (still **training-free**). LoRA/fine-tuning deferred to v2.
