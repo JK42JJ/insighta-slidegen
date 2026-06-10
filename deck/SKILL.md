@@ -11,7 +11,10 @@ description: >-
   user wants Insighta slides, a deck, "슬라이드덱/발표자료/PPT", or to turn a summary/
   topic into a branded, reusable, editable teaching deck. Designed so weaker models
   (e.g. Sonnet via API/OpenRouter) reproduce the same quality. Pretendard + JetBrains Mono.
-license: Insighta internal use.
+license: >-
+  Vendored from the insighta-visual-deck skill. Brand tokens are product design
+  constants, not secrets. Fonts: Pretendard / JetBrains Mono, SIL OFL 1.1 (see
+  assets/fonts/).
 ---
 
 # Insighta Visual Deck
