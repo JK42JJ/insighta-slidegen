@@ -14,7 +14,8 @@ Mode gate (SLIDEGEN_MODE env var):
 
 Pipeline (per job) — canonical order:
     1. acquire.py        → download video + extract raw frames for requested sections
-    2. frames.py         → Katna wide-net candidate extraction (~80 frames)
+    2. frames.py         → PySceneDetect wide-net extraction (~200 candidates)
+                           + pHash/time-even CPU downsample (~60) — ADR 0002 D1/D3
     3. captions.py       → load captions, BGE-M3 embed segments, detect topic-change points
     4. typing_select.py  → CLIP embed candidates + pgvector greedy dedup → ~12 selected frames
                            (aligned with caption topic-change points; definite keep = new image + new topic)
@@ -163,7 +164,7 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
 
     Steps (each updates _jobs[job_id]["progress_pct"]):
         15%  acquire.download_frames(youtube_video_id, sections)
-        30%  frames.extract_candidates(video_path)          → ~80 FrameCandidate
+        30%  frames.extract_candidates(video_path)          → ~60 FrameCandidate
         45%  captions.detect_topic_changes(youtube_video_id) → topic-change points (BGE-M3)
         65%  typing_select.select_keyframes(candidates, topic_points) → ~12 SelectedFrame
         80%  figure_extract.extract_figures(selected_frames, mode)   → layout + OCR
@@ -180,7 +181,7 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
         frames_dir = download_frames(req.youtube_video_id, sections)
         _jobs[job_id]["progress_pct"] = 15.0
 
-        # Step 2: frames (30%) — Katna ~80 candidate frames
+        # Step 2: frames (30%) — PySceneDetect wide net → CPU downsample (~60)
         video_path = frames_dir / "video.mp4"
         candidates = extract_candidates(video_path)
         _jobs[job_id]["progress_pct"] = 30.0

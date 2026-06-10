@@ -2,13 +2,16 @@
 Keyframe selection by a local vision-language model (Qwen2.5-VL) — ADR 0001.
 
 Replaces the former CLIP-embedding + cosine-dedup selector. A local VLM reads
-the Katna candidate frames in timestamp order and decides, per frame, whether it
-is a knowledge-bearing slide and what it contains (graph / equation / type),
+the candidate frames (PySceneDetect wide net → CPU downsample, frames.py — ADR
+0002 D1/D3) in timestamp order and decides, per frame, whether it is a
+knowledge-bearing slide and what it contains (graph / equation / type),
 emitting routing metadata that drives the downstream conditional extraction
 (DocLayout-YOLO region crop / UniMERNet equation OCR).
 
 Inputs:
-    candidates   — ~50-100 FrameCandidate objects from frames.extract_candidates()
+    candidates   — ~60 downsampled FrameCandidate objects (each carrying its
+                   t_start/t_end interval, ADR 0002 D6) from
+                   frames.extract_candidates()
     topic_points — list[CaptionTopicPoint] from captions.detect_topic_changes()
                    (BGE-M3 caption topic-change signal; auxiliary)
 
