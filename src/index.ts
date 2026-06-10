@@ -61,7 +61,9 @@ async function main(): Promise<void> {
     const summary = await fetchV2(youtubeVideoId, prisma);
 
     // Step 3: CV figure extraction
-    const cvSections = (summary.segments ?? []).map((s, i) => ({
+    // segments is an OBJECT { sections, atoms } (real v2 shape) — and both
+    // the column and sections may be null/absent on transcript-less rows.
+    const cvSections = (summary.segments?.sections ?? []).map((s, i) => ({
       index: i,
       from_sec: s.from_sec,
       to_sec: s.to_sec,

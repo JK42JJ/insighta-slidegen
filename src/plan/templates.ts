@@ -34,30 +34,41 @@ export interface LayoutFieldMap {
 /**
  * Master layout field map.
  *
- * TODO: fill in primarySource and zone wiring for each layout.
- * Current stubs document intent; real values come from UX spec.
+ * Source paths follow the REAL v2 shape (slide-manifest.ts mirror):
+ *   - sections live at `segments.sections[n]` (segments is an object);
+ *   - key_points entries are `{ text, timestamp_sec? }` objects → render `.text`;
+ *   - there is NO core.title / core.qa_pairs — cover titles from core.one_liner
+ *     and the per-insight layout ('atom_highlight', formerly 'qa_pair')
+ *     sources from `segments.atoms[n]`;
+ *   - key concepts live at `analysis.key_concepts` ({ term, definition }[]).
+ *
+ * TODO: refine zone wiring per UX spec; current values document the v2 source
+ * of truth for each zone.
  */
 export const LAYOUT_MAP: Record<Layout, LayoutFieldMap> = {
   cover: {
     layout: 'cover',
-    primarySource: 'core.title',
-    zones: { title: 'core.title', body: 'core.one_liner' },
+    primarySource: 'core.one_liner',
+    zones: { title: 'core.one_liner', body: 'analysis.core_argument' },
   },
   section_intro: {
     layout: 'section_intro',
-    primarySource: 'segments[n].title',
-    zones: { title: 'segments[n].title', body: 'segments[n].summary' },
+    primarySource: 'segments.sections[n].title',
+    zones: { title: 'segments.sections[n].title', body: 'segments.sections[n].summary' },
   },
   key_points: {
     layout: 'key_points',
-    primarySource: 'segments[n].key_points',
-    zones: { title: 'segments[n].title', body: 'segments[n].key_points' },
+    primarySource: 'segments.sections[n].key_points',
+    zones: {
+      title: 'segments.sections[n].title',
+      body: 'segments.sections[n].key_points[*].text',
+    },
     maxItems: 5,
   },
-  qa_pair: {
-    layout: 'qa_pair',
-    primarySource: 'core.qa_pairs[n]',
-    zones: { title: 'core.qa_pairs[n].q', body: 'core.qa_pairs[n].a' },
+  atom_highlight: {
+    layout: 'atom_highlight',
+    primarySource: 'segments.atoms[n]',
+    zones: { title: 'segments.atoms[n].type', body: 'segments.atoms[n].text' },
   },
   figure_full: {
     layout: 'figure_full',
@@ -75,13 +86,13 @@ export const LAYOUT_MAP: Record<Layout, LayoutFieldMap> = {
   },
   timeline: {
     layout: 'timeline',
-    primarySource: 'segments',
-    zones: { title: 'core.title', body: 'segments[*].title' },
+    primarySource: 'segments.sections',
+    zones: { title: 'core.one_liner', body: 'segments.sections[*].title' },
   },
   summary: {
     layout: 'summary',
-    primarySource: 'core.key_concepts',
-    zones: { title: 'core.one_liner', body: 'core.key_concepts' },
+    primarySource: 'analysis.key_concepts',
+    zones: { title: 'core.one_liner', body: 'analysis.key_concepts[*].term' },
     maxItems: 6,
   },
   blank: {
