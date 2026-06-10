@@ -6,13 +6,16 @@
  *   2. quality_flag     = 'pass'
  *   3. transcript_used  = true
  *
- * On gate failure the function throws a descriptive error so the caller
- * (orchestrator) can write a "gate_failed" status to slide_jobs and stop.
- * It does NOT silently fall back to v1 data.
+ * On gate failure the function throws a descriptive "V2_GATE_FAILED: ..."
+ * error so the caller (orchestrator) can write a "gate_failed" status to
+ * slide_jobs and stop. It does NOT silently fall back to v1 data.
  *
- * The fetched JSON is validated against V2SummarySchema (Zod) at runtime.
- * Any schema mismatch throws a ZodError, surfacing data-quality regressions
- * rather than propagating malformed data into the planner.
+ * The fetched row is validated against V2SummarySchema (Zod) at runtime.
+ * Any schema mismatch on a consumed field (e.g. segments delivered as an
+ * array instead of the real { sections, atoms } object) throws a ZodError,
+ * surfacing data-quality regressions rather than propagating malformed data
+ * into the planner. READ-ONLY access — this module never writes to insighta
+ * tables.
  */
 import { PrismaClient } from '@prisma/client';
 import { V2SummarySchema, type V2Summary } from '@/types/slide-manifest';
@@ -29,18 +32,37 @@ import { V2SummarySchema, type V2Summary } from '@/types/slide-manifest';
  * @param youtubeVideoId - 11-character YouTube video id.
  * @param prisma - Prisma client instance (caller-injected for testability).
  * @returns Validated V2Summary.
- * @throws Error with message "V2_GATE_FAILED: ..." if gate conditions unmet.
+ * @throws Error with message "V2_GATE_FAILED: ..." if the row is missing or
+ *   any gate condition is unmet.
  * @throws ZodError if row shape does not match V2SummarySchema.
- *
- * TODO: implement — use prisma.video_rich_summaries.findUnique({ where: { video_id } })
- *   then run the three gate assertions before calling V2SummarySchema.parse().
  */
-export async function fetchV2(_youtubeVideoId: string, _prisma?: PrismaClient): Promise<V2Summary> {
-  // TODO: SELECT * FROM video_rich_summaries WHERE video_id = _youtubeVideoId
-  // Assert template_version='v2', quality_flag='pass', transcript_used=true.
-  // Return V2SummarySchema.parse(row) — throws ZodError on shape mismatch.
-  void V2SummarySchema; // referenced to keep import live until TODO is implemented
-  throw new Error(
-    'TODO: fetchV2 — query video_rich_summaries, assert v2/pass/transcript_used gate, zod-validate'
-  );
+export async function fetchV2(youtubeVideoId: string, prisma?: PrismaClient): Promise<V2Summary> {
+  const client = prisma ?? new PrismaClient();
+
+  const row = await client.video_rich_summaries.findUnique({
+    where: { video_id: youtubeVideoId },
+  });
+
+  if (row === null) {
+    throw new Error(
+      `V2_GATE_FAILED: no video_rich_summaries row for video_id=${youtubeVideoId} — generate the v2 summary first`
+    );
+  }
+  if (row.template_version !== 'v2') {
+    throw new Error(
+      `V2_GATE_FAILED: template_version='${row.template_version}' (expected 'v2') for video_id=${youtubeVideoId}`
+    );
+  }
+  if (row.quality_flag !== 'pass') {
+    throw new Error(
+      `V2_GATE_FAILED: quality_flag='${row.quality_flag ?? 'null'}' (expected 'pass') for video_id=${youtubeVideoId}`
+    );
+  }
+  if (row.transcript_used !== true) {
+    throw new Error(
+      `V2_GATE_FAILED: transcript_used=${String(row.transcript_used)} (expected true) for video_id=${youtubeVideoId}`
+    );
+  }
+
+  return V2SummarySchema.parse(row);
 }

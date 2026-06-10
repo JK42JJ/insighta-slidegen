@@ -1,0 +1,11 @@
+// Lint-only project file: the build tsconfig excludes *.test.ts / *.fixture.ts,
+// but ESLint's type-aware rules require every linted file to belong to a
+// project. This config widens the file set WITHOUT affecting `tsc` build output.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*", "tests/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
