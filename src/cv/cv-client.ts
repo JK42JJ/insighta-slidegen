@@ -30,6 +30,13 @@ export interface CvGenerateRequest {
     index: number;
     from_sec: number;
     to_sec: number;
+    /** v2 section title — grounding text for the Qwen select call (ADR 0002 D5). */
+    title: string;
+    /**
+     * v2 section summary — companion text for mode A select+classify
+     * (CONTRACT_model-endpoints §2.2). HINT only, never a keep/drop gate.
+     */
+    summary?: string;
   }>;
   mode: 'dev' | 'prod';
 }
