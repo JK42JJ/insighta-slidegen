@@ -191,11 +191,11 @@ dedicated PR).
 1. ~~PR-A — this ADR + doc sync~~ (this change).
 2. **PR-B** — v2 mirror rewrite + `fetchV2` + fixture tests (blocker for all consumers).
 3. **PR-C** — vendor `insighta-visual-deck` (D7) + fixture-content build → `validate_deck.py` PASS smoke.
-4. **PR-D** — `frames.py` port per 0002 §7 (PySceneDetect primary) with the **recall-first acceptance criterion (D5)**.
+4. **PR-D** — `frames.py` port per 0002 §7 (PySceneDetect primary) with the **recall-first acceptance criterion (D5; measured as [ADR 0004](./0004-a-quality-gate-and-b-transition-triggers.md) G4)**.
 5. **PR-E** — model-endpoint clients (Qwen3-VL / DocLayout-YOLO, URL-injected; extend `vlm_router.py` backends with an HTTP backend; Qwen3-VL default).
 6. **PR-F** — bundle assembly + orchestrate loop port (LLM injected; stub-driven E2E FAIL→PASS in dev).
-7. **PR-G** — raw SQL DDL (D6 + `slide_jobs` columns).
-8. **PR-H** — dev-path E2E on one real video (CC console as the LLM) → deck artifact + validate PASS.
+7. **PR-G** — raw SQL DDL (D6 + `slide_jobs` columns; must satisfy the queryability requirement of [ADR 0004](./0004-a-quality-gate-and-b-transition-triggers.md) §2 — `attempts`, `failure_stage`).
+8. **PR-H** — dev-path E2E → deck artifact + validate PASS. Acceptance criteria + B-transition triggers: **[ADR 0004](./0004-a-quality-gate-and-b-transition-triggers.md)**.
 
 ---
 
