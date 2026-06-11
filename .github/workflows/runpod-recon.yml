@@ -1,0 +1,61 @@
+# RunPod pod recon (workflow_dispatch only) — PR-H2 bootstrap support.
+#
+# WHY a workflow: RUNPOD_API_KEY lives ONLY in GH Secrets (write-only from
+# outside Actions). This job queries the RunPod GraphQL API for the account's
+# pods and exports {id, name, status, ssh port mapping} so the operator can
+# SSH-bootstrap the pod (vLLM + YOLO, see runpod/INSTALL.md).
+#
+# PUBLIC-repo safety: this repo's Action logs and artifacts are publicly
+# readable. NOTHING pod-identifying is ever echoed to the log, and the
+# artifact is encrypted to a THROWAWAY RSA public key passed as a dispatch
+# input (hybrid AES-256 + RSA-OAEP). Only the dispatching operator holds the
+# matching private key. Artifact retention: 1 day; delete after download.
+
+name: runpod-recon
+
+on:
+  workflow_dispatch:
+    inputs:
+      rsa_pubkey_b64:
+        description: 'Throwaway RSA public key (PEM, base64) used to encrypt the pod info'
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query pods and encrypt the result (no pod detail reaches the log)
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          PUB_B64: ${{ github.event.inputs.rsa_pubkey_b64 }}
+        run: |
+          set -euo pipefail
+          curl -sf https://api.runpod.io/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $RUNPOD_API_KEY" \
+            -d '{"query":"query { myself { pods { id name desiredStatus runtime { ports { ip isIpPublic privatePort publicPort type } } } } }"}' \
+            > pods.json
+          COUNT=$(jq '.data.myself.pods | length' pods.json)
+          echo "pods visible: $COUNT (all detail goes to the encrypted artifact only)"
+          jq -c '{pods: [.data.myself.pods[] | {id, name, status: .desiredStatus, ssh: [((.runtime.ports // [])[] | select(.privatePort == 22))]}]}' \
+            pods.json > pod-info.json
+          echo "$PUB_B64" | base64 -d > pub.pem
+          openssl rand -base64 32 > aes.pass
+          openssl enc -aes-256-cbc -pbkdf2 -salt -pass file:aes.pass \
+            -in pod-info.json -out pod-info.enc
+          openssl pkeyutl -encrypt -pubin -inkey pub.pem \
+            -pkeyopt rsa_padding_mode:oaep \
+            -in aes.pass -out aes.pass.enc
+          rm -f pods.json pod-info.json aes.pass pub.pem
+
+      - name: Upload encrypted artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pod-info-encrypted
+          path: |
+            pod-info.enc
+            aes.pass.enc
+          retention-days: 1
