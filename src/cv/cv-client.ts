@@ -77,8 +77,15 @@ const POLL_INTERVAL_MS = 2_000;
 /** Default overall budget; real prod runs pass a larger opts.timeoutMs
  * (acquire alone can take minutes on a long video). */
 const DEFAULT_TIMEOUT_MS = 300_000;
-/** Transient 5xx retry budget for the submit call (§2.3 mirror). */
+/** Transient 5xx / network-throw retry budget for the submit call (§2.3 mirror). */
 const SUBMIT_RETRIES = 2;
+/** Consecutive status-poll failures tolerated before giving up (a long CV job
+ * must survive a brief network blip — observed live on the tailnet). */
+const POLL_FAILURE_TOLERANCE = 5;
+
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 /**
  * A CV-service job failure with ADR 0004 stage attribution. `stage` is the
@@ -212,40 +219,63 @@ export async function extractFigures(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS;
 
-  // 1. submit (transient 5xx retried, 4xx fails immediately)
+  // 1. submit (transient 5xx AND thrown network errors retried — a Tailscale
+  //    blip killed two runs live; 4xx still fails immediately)
   let submitResponse: Response | undefined;
+  let lastNetworkError: unknown;
   for (let attempt = 0; attempt <= SUBMIT_RETRIES; attempt++) {
-    submitResponse = await fetchImpl(`${base}/slides/generate`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(request),
-    });
-    if (submitResponse.status < 500) break;
+    try {
+      submitResponse = await fetchImpl(`${base}/slides/generate`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(request),
+      });
+      if (submitResponse.status < 500) break;
+    } catch (err) {
+      lastNetworkError = err;
+      submitResponse = undefined;
+    }
     if (attempt < SUBMIT_RETRIES) await sleep(pollIntervalMs);
   }
   if (!submitResponse || !submitResponse.ok) {
-    throw new CvExtractionError(
-      `cv service generate failed: HTTP ${submitResponse?.status ?? 'n/a'}`,
-      null
-    );
+    const detail = submitResponse
+      ? `HTTP ${submitResponse.status}`
+      : `network error: ${errMessage(lastNetworkError)}`;
+    throw new CvExtractionError(`cv service generate failed: ${detail}`, null);
   }
   const { job_id: jobId } = GenerateResponseSchema.parse(await submitResponse.json());
 
-  // 2. poll until done/error/timeout
+  // 2. poll until done/error/timeout — transient poll failures (network throw
+  //    or non-2xx) tolerate up to POLL_FAILURE_TOLERANCE in a row.
   const deadline = now() + timeoutMs;
   let lastSeenStage: JobStage | null = null;
+  let consecutivePollFailures = 0;
   for (;;) {
-    const statusResponse = await fetchImpl(
-      `${base}/slides/status?job_id=${encodeURIComponent(jobId)}`,
-      { headers }
-    );
-    if (!statusResponse.ok) {
-      throw new CvExtractionError(
-        `cv service status failed: HTTP ${statusResponse.status}`,
-        lastSeenStage
+    let status: z.infer<typeof StatusResponseSchema>;
+    try {
+      const statusResponse = await fetchImpl(
+        `${base}/slides/status?job_id=${encodeURIComponent(jobId)}`,
+        { headers }
       );
+      if (!statusResponse.ok) {
+        throw new Error(`HTTP ${statusResponse.status}`);
+      }
+      status = StatusResponseSchema.parse(await statusResponse.json());
+      consecutivePollFailures = 0;
+    } catch (err) {
+      consecutivePollFailures += 1;
+      if (consecutivePollFailures > POLL_FAILURE_TOLERANCE) {
+        throw new CvExtractionError(
+          `cv service status failed ${consecutivePollFailures}x: ${errMessage(err)}`,
+          lastSeenStage
+        );
+      }
+      if (now() >= deadline) {
+        throw new CvExtractionError(`cv job timeout after ${timeoutMs}ms`, lastSeenStage);
+      }
+      await sleep(pollIntervalMs);
+      continue;
     }
-    const status = StatusResponseSchema.parse(await statusResponse.json());
     lastSeenStage = parseStage(status.stage) ?? lastSeenStage;
 
     if (status.status === 'done') break;
