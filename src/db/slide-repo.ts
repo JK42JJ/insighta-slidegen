@@ -9,7 +9,7 @@
  *   slide_jobs   — one row per pipeline run; stage advances in place and
  *                  failures pin failure_stage (ADR 0004 attribution, PR-H1).
  */
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import type { SlideOutline, FigureRef } from '@/types/slide-manifest';
 import { JOB_STAGES, JOB_STATUSES, type JobStage, type JobStatus } from '@/types/job-stages';
 
@@ -18,80 +18,133 @@ export interface UpsertDeckResult {
   created: boolean;
 }
 
+/** Nullable Json column input: absent/null → SQL NULL, else the value. */
+function jsonOrDbNull(value: unknown): Prisma.InputJsonValue | typeof Prisma.DbNull {
+  return value === undefined || value === null ? Prisma.DbNull : (value as Prisma.InputJsonValue);
+}
+
 /**
- * Upserts a slide_decks row from a SlideOutline.
+ * Upserts a slide_decks row from a SlideOutline (PR-H2).
  *
- * Algorithm:
- *   1. prisma.slide_decks.upsert({ where: { uq_slide_decks_video_version }, ... })
- *   2. Return deckId + whether the row was newly created.
- *
- * @param outline - Planner output containing video_id, generator_version, fingerprint.
- * @param userId  - Optional: stored for per-user deck queries.
- * @param prisma  - Prisma client instance.
- *
- * TODO: implement upsert on unique constraint (video_id, generator_version).
- * Set status='building', clear error, store v2_fingerprint.
+ * Upsert key: the (video_id, generator_version) unique constraint — a re-run
+ * of the same video/generator rebuilds the SAME deck row (status back to
+ * 'building', error cleared, fingerprint refreshed).
  */
 export async function upsertDeck(
-  _outline: SlideOutline,
-  _userId: string | undefined,
-  _prisma: PrismaClient
+  outline: SlideOutline,
+  userId: string | undefined,
+  prisma: PrismaClient
 ): Promise<UpsertDeckResult> {
-  throw new Error('TODO: upsertDeck — prisma.slide_decks.upsert on (video_id, generator_version)');
+  const uniqueWhere = {
+    video_id_generator_version: {
+      video_id: outline.video_id,
+      generator_version: outline.generator_version,
+    },
+  };
+  const existing = await prisma.slide_decks.findUnique({
+    where: uniqueWhere,
+    select: { id: true },
+  });
+  const row = await prisma.slide_decks.upsert({
+    where: uniqueWhere,
+    create: {
+      video_id: outline.video_id,
+      lang: outline.lang,
+      generator_version: outline.generator_version,
+      v2_fingerprint: outline.v2_fingerprint,
+      status: 'building',
+      slide_count: outline.slides.length,
+      user_id: userId ?? null,
+    },
+    update: {
+      lang: outline.lang,
+      v2_fingerprint: outline.v2_fingerprint,
+      status: 'building',
+      slide_count: outline.slides.length,
+      error: null,
+      ...(userId !== undefined ? { user_id: userId } : {}),
+    },
+    select: { id: true },
+  });
+  return { deckId: row.id, created: existing === null };
 }
 
 /**
- * Replaces all slide_slides rows for a deck (delete + re-insert).
+ * Replaces all slide_slides rows for a deck (full rebuild, one transaction).
  *
- * @param _deckId  - UUID of the parent slide_decks row.
- * @param _outline - Planner output containing ordered slides array.
- * @param _prisma  - Prisma client instance.
- *
- * TODO: wrap in prisma.$transaction([deleteMany, createMany]).
+ * slide_figures.slide_id references slides — detach deck figures from slides
+ * FIRST so the delete cannot hit the FK. Per-slide figure linkage is a later
+ * concern; figures live at deck level (replaceFigures).
  */
 export async function replaceSlides(
-  _deckId: string,
-  _outline: SlideOutline,
-  _prisma: PrismaClient
+  deckId: string,
+  outline: SlideOutline,
+  prisma: PrismaClient
 ): Promise<void> {
-  throw new Error('TODO: replaceSlides — deleteMany + createMany within a transaction');
+  await prisma.$transaction([
+    prisma.slide_figures.updateMany({
+      where: { deck_id: deckId },
+      data: { slide_id: null },
+    }),
+    prisma.slide_slides.deleteMany({ where: { deck_id: deckId } }),
+    prisma.slide_slides.createMany({
+      data: outline.slides.map((slide) => ({
+        deck_id: deckId,
+        position: slide.position,
+        layout: slide.layout,
+        title: slide.title ?? null,
+        body_json: jsonOrDbNull(slide.body_json),
+        notes: slide.notes ?? null,
+        section_ref: slide.section_ref ?? null,
+      })),
+    }),
+  ]);
 }
 
 /**
- * Replaces slide_figures rows for a deck (delete + re-insert).
- *
- * @param _deckId  - UUID of the parent slide_decks row.
- * @param _figures - FigureRef list from CV client or existing DB cache.
- * @param _prisma  - Prisma client instance.
- *
- * TODO: implement.
+ * Replaces slide_figures rows for a deck (delete + re-insert, one transaction).
  */
 export async function replaceFigures(
-  _deckId: string,
-  _figures: FigureRef[],
-  _prisma: PrismaClient
+  deckId: string,
+  figures: FigureRef[],
+  prisma: PrismaClient
 ): Promise<void> {
-  throw new Error('TODO: replaceFigures — deleteMany + createMany');
+  await prisma.$transaction([
+    prisma.slide_figures.deleteMany({ where: { deck_id: deckId } }),
+    prisma.slide_figures.createMany({
+      data: figures.map((figure) => ({
+        deck_id: deckId,
+        cv_figure_id: figure.cv_figure_id,
+        kind: figure.kind,
+        png_url: figure.png_url,
+        vector_pdf_url: figure.vector_pdf_url ?? null,
+        vector_svg_url: figure.vector_svg_url ?? null,
+        caption: figure.caption ?? null,
+        timestamp_sec: figure.timestamp_sec ?? null,
+        atom_refs: jsonOrDbNull(figure.atom_refs),
+        verification_status: figure.verification_status,
+        extraction_conf: figure.extraction_conf ?? null,
+        extracted_latex: figure.extracted_latex ?? null,
+        bbox: jsonOrDbNull(figure.bbox),
+      })),
+    }),
+  ]);
 }
 
 /**
  * Updates status and error fields of a slide_decks row.
  * Called by the orchestrator after each pipeline stage completes or fails.
- *
- * @param _deckId - UUID of the target slide_decks row.
- * @param _status - New status string ("building" | "done" | "error" | ...).
- * @param _error  - Error message to store, or null to clear.
- * @param _prisma - Prisma client instance.
- *
- * TODO: implement prisma.slide_decks.update.
  */
 export async function setDeckStatus(
-  _deckId: string,
-  _status: string,
-  _error: string | null,
-  _prisma: PrismaClient
+  deckId: string,
+  status: string,
+  error: string | null,
+  prisma: PrismaClient
 ): Promise<void> {
-  throw new Error('TODO: setDeckStatus — prisma.slide_decks.update');
+  await prisma.slide_decks.update({
+    where: { id: deckId },
+    data: { status, error },
+  });
 }
 
 // ── slide_jobs recording (PR-H1; columns from slidegen-jobs-v2 DDL) ──────────
