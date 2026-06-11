@@ -314,3 +314,25 @@ def test_multiple_boxes_yield_multiple_figures(tmp_path):
     figures = run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path)
     assert [f.kind for f in figures] == ["chart", "diagram"]
     assert figures[0].cv_figure_id != figures[1].cv_figure_id
+
+
+def test_crop_contract_error_skips_crop_not_video(tmp_path):
+    """PR-H2: broken JSON after the re-ask kills only that CROP — the video's
+    remaining crops still extract (flag-don't-kill granularity, ADR 0003 D3).
+    Found live in the first PR-H2 measurement: one malformed struct out of
+    hundreds of crop calls killed the whole video at `numerize`."""
+    yolo = make_yolo_stub(
+        [
+            {"bbox": {"x": 0, "y": 0, "w": 100, "h": 80}, "class": "figure", "score": 0.8},
+            {"bbox": {"x": 150, "y": 50, "w": 100, "h": 80}, "class": "table", "score": 0.3},
+        ]
+    )
+    vlm = VlmStub()
+    # Crop 1: invalid JSON on the initial call AND the single re-ask → contract
+    # error → skipped. Crop 2: valid chart reply → extracted.
+    vlm.script_content('{"kind": "chart", "struct": broken', "still not json", CHART_REPLY)
+
+    figures = run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path)
+
+    assert len(figures) == 1
+    assert figures[0].kind == "chart"

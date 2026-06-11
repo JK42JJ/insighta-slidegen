@@ -39,12 +39,14 @@ Entry: extract_figures(selected_frames, yolo=..., vlm=...) → list[ExtractedFig
 from __future__ import annotations
 
 import hashlib
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 
+from model_clients import VlmContractError
 from typing_select import SelectedFrame
 from vlm_router import _image_data_url as image_data_url
 
@@ -138,7 +140,8 @@ def extract_figures(
     Returns one ExtractedFigure per detected region of each flagged frame,
     plus one `keyframe` entry per unflagged frame. Raises ModelEndpointError
     (stage `detect` / `recognize`) on endpoint failure — attribution is
-    preserved for ADR 0004 §4 stats.
+    preserved for ADR 0004 §4 stats. A per-crop CONTRACT failure (broken JSON
+    after the re-ask) only skips that crop (logged), never the whole video.
     """
     crops_dir = Path(out_dir) if out_dir else Path(tempfile.mkdtemp(prefix="slidegen_crops_"))
     crops_dir.mkdir(parents=True, exist_ok=True)
@@ -185,17 +188,33 @@ def extract_figures(
             crop_url = image_data_url(crop_path)
 
             # WHAT: mode B per-crop kind + struct (stage `recognize` on failure).
-            classification = vlm.classify_crop(
-                crop_url, CROP_CLASSIFY_PROMPT, caption_slice=_caption_slice(frame)
-            )
-            kind = classification["kind"]
+            # A CONTRACT failure (model emitted broken JSON even after the
+            # single re-ask) is a per-CROP weakness, not a per-VIDEO failure:
+            # skip the crop and keep extracting (flag-don't-kill — ADR 0003 D3
+            # granularity; counts surface via the skip log). Endpoint/infra
+            # errors (5xx, network) still raise — those ARE stage failures.
+            try:
+                classification = vlm.classify_crop(
+                    crop_url, CROP_CLASSIFY_PROMPT, caption_slice=_caption_slice(frame)
+                )
+                kind = classification["kind"]
 
-            if kind == EQUATION_KIND:
-                # Mode C: Qwen OCR → LaTeX (ADR 0003 D3; stage `recognize`).
-                ocr = vlm.equation_ocr(crop_url, EQUATION_OCR_PROMPT)
-                latex, struct, conf = ocr["latex"], None, ocr["confidence"]
-            else:
-                latex, struct, conf = None, classification["struct"], classification["confidence"]
+                if kind == EQUATION_KIND:
+                    # Mode C: Qwen OCR → LaTeX (ADR 0003 D3; stage `recognize`).
+                    ocr = vlm.equation_ocr(crop_url, EQUATION_OCR_PROMPT)
+                    latex, struct, conf = ocr["latex"], None, ocr["confidence"]
+                else:
+                    latex, struct, conf = (
+                        None,
+                        classification["struct"],
+                        classification["confidence"],
+                    )
+            except VlmContractError as exc:
+                sys.stderr.write(
+                    f"figure_extract: crop contract error skipped "
+                    f"(t={timestamp}s box={box_index}): {exc}\n"
+                )
+                continue
 
             figures.append(
                 ExtractedFigure(
