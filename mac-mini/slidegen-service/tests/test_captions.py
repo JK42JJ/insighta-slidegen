@@ -141,3 +141,112 @@ def test_short_segments_filtered():
 
                 # short_seg should be filtered, so embed_texts should receive 1 text
                 mock_embed.assert_called_once_with(["Long"])
+
+
+# ── PR-G regressions: persisted shape ↔ raw SQL DDL ──────────────────────────
+
+
+class _FakeCursor:
+    def __init__(self, executed):
+        self._executed = executed
+
+    def execute(self, sql, params=None):
+        self._executed.append((sql, params))
+
+    def close(self):
+        pass
+
+
+class _FakeConn:
+    def __init__(self, executed):
+        self._executed = executed
+
+    def cursor(self):
+        return _FakeCursor(self._executed)
+
+    def commit(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def _run_persist_with_fake_db(monkeypatch):
+    """Run _persist_segments against a fake psycopg2; return executed SQL."""
+    import sys
+    import types
+
+    from captions import CaptionSegment, _persist_segments
+
+    executed = []
+    fake_psycopg2 = types.ModuleType("psycopg2")
+    fake_psycopg2.connect = lambda dsn: _FakeConn(executed)
+    monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://stub/stub")
+
+    segment = CaptionSegment(from_sec=0.0, to_sec=5.0, text="VERBATIM", bge_embedding=[0.1] * 4)
+    _persist_segments("synthvid001", [segment], [])
+    return executed
+
+
+def test_persist_segments_insert_matches_ddl_columns(monkeypatch):
+    """Regression (PR-G): the INSERT column list must be a subset of the live
+    DDL columns (init DDL minus the 002 text drop).
+
+    Blocks the silent-fail class: the pre-PR-G INSERT wrote to a nonexistent
+    bge_embedding column (DDL says embedding) and was swallowed by the blanket
+    except — every persist failed silently.
+    """
+    import re
+    from pathlib import Path
+
+    executed = _run_persist_with_fake_db(monkeypatch)
+    assert executed, "_persist_segments executed no SQL"
+    sql, _params = executed[0]
+
+    insert_cols = {
+        col.strip() for col in re.search(r"\(([^)]+)\)\s*VALUES", sql).group(1).split(",")
+    }
+
+    # DDL source of truth: init CREATE TABLE minus the 002 text drop.
+    repo_root = Path(__file__).resolve().parents[3]
+    init_ddl = (
+        repo_root / "prisma/migrations/slidegen-init/001_create_slide_tables.sql"
+    ).read_text()
+    block = re.search(
+        r"CREATE TABLE IF NOT EXISTS slide_caption_segments \((.*?)\n\);", init_ddl, re.S
+    ).group(1)
+    ddl_cols = {m.group(1) for m in re.finditer(r"^\s{2}(\w+)", block, re.M)}
+    drop_ddl = (
+        repo_root / "prisma/migrations/slidegen-jobs-v2/002_caption_segments_drop_text.sql"
+    ).read_text()
+    assert "DROP COLUMN IF EXISTS text" in drop_ddl
+    ddl_cols.discard("text")
+
+    assert insert_cols <= ddl_cols, f"INSERT columns {insert_cols} not all in DDL {ddl_cols}"
+    assert "bge_embedding" not in sql  # the silent-fail bug, pinned
+
+
+def test_persist_segments_never_stores_verbatim_text(monkeypatch):
+    """ADR 0003 D6: no verbatim caption text in slidegen — neither as an INSERT
+    column nor riding along in the bound parameters."""
+    import re
+
+    executed = _run_persist_with_fake_db(monkeypatch)
+    sql, params = executed[0]
+
+    insert_cols = {
+        col.strip() for col in re.search(r"\(([^)]+)\)\s*VALUES", sql).group(1).split(",")
+    }
+    assert "text" not in insert_cols
+    assert "VERBATIM" not in [p for p in params if isinstance(p, str)]
+
+
+def test_persist_segments_writes_only_slidegen_schema(monkeypatch):
+    """Write-path rule: this module may write ONLY to slidegen-owned slide_*
+    tables (insighta tables are read-only sources)."""
+    executed = _run_persist_with_fake_db(monkeypatch)
+
+    for sql, _params in executed:
+        if "INSERT" in sql.upper() or "UPDATE" in sql.upper() or "DELETE" in sql.upper():
+            assert "slidegen.slide_caption_segments" in sql
