@@ -17,8 +17,10 @@ Run (see runpod/INSTALL.md):
 
 from __future__ import annotations
 
+import base64
 import io
 import os
+import re
 import threading
 
 import httpx
@@ -35,6 +37,25 @@ IMG_SIZE = 1024
 DEFAULT_CONF_THRESHOLD = 0.15
 DEFAULT_MAX_BOXES = 50
 FETCH_TIMEOUT_SEC = 30.0
+
+# PR-H2: the CV service ships frames/crops as base64 data URLs (the same
+# call shape vlm_router uses toward Qwen) — httpx cannot fetch the data:
+# scheme, so it is decoded inline here. Presigned-GET migration for BOTH
+# model paths (contract §4 strict) is a deferred follow-up.
+DATA_URL_SCHEME = "data:"
+DATA_URL_BASE64_MARKER = ";base64"
+
+
+def _load_image_bytes(image_url: str) -> bytes:
+    """Image bytes from a presigned GET url OR an inline base64 data url."""
+    if image_url.startswith(DATA_URL_SCHEME):
+        header, _, payload = image_url.partition(",")
+        if DATA_URL_BASE64_MARKER not in header or not payload:
+            raise ValueError("unsupported data url (expected ';base64,<payload>')")
+        return base64.b64decode(payload)
+    response = httpx.get(image_url, timeout=FETCH_TIMEOUT_SEC, follow_redirects=True)
+    response.raise_for_status()
+    return response.content
 
 app = FastAPI(title="slidegen-yolo", version=MODEL_VERSION)
 
@@ -77,14 +98,14 @@ def health(_: None = Depends(_check_auth)) -> dict:
 
 @app.post("/detect")
 def detect(req: DetectRequest, _: None = Depends(_check_auth)) -> dict:
-    # 1) Fetch the frame via the presigned GET url (the pod NEVER holds AWS
-    #    credentials — §4 backend-only presign issuance).
+    # 1) Load the frame: presigned GET url (the pod NEVER holds AWS
+    #    credentials — §4 backend-only presign issuance) or inline data url.
     try:
-        response = httpx.get(req.image_url, timeout=FETCH_TIMEOUT_SEC, follow_redirects=True)
-        response.raise_for_status()
-        image = Image.open(io.BytesIO(response.content)).convert("RGB")
+        image = Image.open(io.BytesIO(_load_image_bytes(req.image_url))).convert("RGB")
     except Exception as exc:  # noqa: BLE001 — single fetch boundary
-        raise HTTPException(status_code=422, detail=f"image fetch failed: {exc}") from exc
+        # Mask any url (presigned GET carries a signature) out of the detail.
+        detail = re.sub(r"(https?|data):\S+", "<url>", str(exc))
+        raise HTTPException(status_code=422, detail=f"image fetch failed: {detail}") from exc
 
     width, height = image.size
 

@@ -53,6 +53,23 @@ SLIDEGEN_MODE = os.environ.get("SLIDEGEN_MODE", "dev")
 # In-memory job store — replace with Redis or Supabase for multi-worker prod.
 _jobs: dict[str, dict[str, Any]] = {}
 
+# ── ADR 0004 §4 failure-stage attribution (PR-H2) ────────────────────────────
+# slide_jobs.stage / failure_stage CHECK domain — MUST stay 1:1 with
+# src/types/job-stages.ts and the slidegen-jobs-v2 DDL.
+FAILURE_STAGES = {"acquire", "keyframe", "detect", "select", "numerize", "build", "validate"}
+# model_clients raises mode-B/C failures as stage="recognize" (§2.3); the DDL
+# stage name for that family is "numerize".
+STAGE_ALIASES = {"recognize": "numerize"}
+
+
+def _normalize_failure_stage(exc: Exception, fallback: str | None) -> str | None:
+    """Stage a failed run died in: the exception's own attribution
+    (ModelEndpointError.stage) wins over the pipeline-step fallback; anything
+    outside the DDL domain degrades to None (manual attribution)."""
+    raw = getattr(exc, "stage", None) or fallback
+    raw = STAGE_ALIASES.get(raw, raw)
+    return raw if raw in FAILURE_STAGES else None
+
 
 # ----------------------------------------------------------------
 # Request / Response models
@@ -88,6 +105,13 @@ class StatusResponse(BaseModel):
     status: str
     progress_pct: float
     error: str | None = None
+    # Stage the job is currently running (None until started) — lets the
+    # polling client attribute a TIMEOUT to the stage it died in (PR-G
+    # timeout convention).
+    stage: str | None = None
+    # ADR 0004 §4: stage a FAILED job died in (None unless status='error',
+    # or when the failure is outside the stage domain — manual attribution).
+    failure_stage: str | None = None
 
 
 class FigureResult(BaseModel):
@@ -165,6 +189,8 @@ def slides_status(job_id: str) -> StatusResponse:
         status=job["status"],
         progress_pct=job["progress_pct"],
         error=job.get("error"),
+        stage=job.get("stage"),
+        failure_stage=job.get("failure_stage"),
     )
 
 
@@ -301,13 +327,19 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
 
     On exception: set status='error', error=str(e).
     """
+    # ADR 0004 fallback attribution: which DDL stage each pipeline step maps
+    # to. A raised ModelEndpointError overrides this with its own .stage.
+    stage: str | None = "acquire"
     try:
         _jobs[job_id]["status"] = "running"
+        _jobs[job_id]["stage"] = stage
 
         # Step 1: acquire (15%) — download video + extract JPEG frames
         sections = [s.model_dump() for s in req.sections]
         frames_dir = download_frames(req.youtube_video_id, sections)
         _jobs[job_id]["progress_pct"] = 15.0
+        stage = "keyframe"
+        _jobs[job_id]["stage"] = stage
 
         # Step 2: frames (30%) — PySceneDetect wide net → CPU downsample (~60).
         # NOTE: acquire does not expose the source's expected duration yet, so
@@ -320,11 +352,15 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
         # Step 3: captions (45%) — BGE-M3 topic-change detection
         topic_points = detect_topic_changes(req.youtube_video_id, req.mode)
         _jobs[job_id]["progress_pct"] = 45.0
+        stage = "select"
+        _jobs[job_id]["stage"] = stage
 
         # Step 4: typing_select (65%) — VLM-routed selection, grounded by the
         # v2 section text (HINT only, never a keep/drop gate — ADR 0002 D5).
         selected = select_keyframes(candidates, topic_points, req.mode, sections=sections)
         _jobs[job_id]["progress_pct"] = 65.0
+        stage = "numerize"
+        _jobs[job_id]["stage"] = stage
 
         # Step 5: figure_extract (80%) — YOLO crop + Qwen numerization on the
         # selected frames only. Clients are env-gated (http opt-in → live
@@ -334,6 +370,10 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
             selected, yolo=yolo, vlm=vlm, out_dir=frames_dir / "crops"
         )
         _jobs[job_id]["progress_pct"] = 80.0
+        # bundle is resource assembly, not a model stage — a failure there is
+        # outside the DDL stage domain (None → manual attribution).
+        stage = None
+        _jobs[job_id]["stage"] = stage
 
         # Step 6: bundle (95%) — orchestrate resources (TEXT/DATA/LaTeX only;
         # raw frame pixels are banned from the bundle — ADR 0003 P2).
@@ -359,5 +399,6 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
         _jobs[job_id].update({
             "status": "error",
             "error": str(exc),
+            "failure_stage": _normalize_failure_stage(exc, stage),
             "progress_pct": 0.0,
         })
