@@ -33,7 +33,9 @@ upheld; this is an open-weights local model, not an API call).
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from frames import FrameCandidate
 from vlm_router import route_frames
@@ -44,6 +46,22 @@ TOPIC_ALIGN_WINDOW_SEC = 3.0
 # Final selected-frame target band (ADR 0001: 12-20 knowledge-bearing slides).
 TARGET_SELECTED_MIN = 12
 TARGET_SELECTED_MAX = 20
+
+
+@dataclass
+class SectionContext:
+    """A v2 rich-summary section: a time window plus its title/summary text.
+
+    Mirrors app.py's `Section` pydantic model (the TS client sends title +
+    summary from `video_rich_summaries.segments.sections`). The text is the
+    Qwen select call's grounding input — ADR 0002 D5: a HINT for selection,
+    NEVER a keep/drop gate (no code path may drop a frame because of it).
+    """
+    index: int
+    from_sec: float
+    to_sec: float
+    title: str = ""
+    summary: str | None = None
 
 
 @dataclass
@@ -82,9 +100,18 @@ def select_keyframes(
     candidates: list[FrameCandidate],
     topic_points: list[CaptionTopicPoint],
     mode: str = "dev",
+    sections: Sequence[SectionContext | Mapping[str, Any]] | None = None,
 ) -> list[SelectedFrame]:
     """
     Select 12-20 keyframes from the candidates via the local VLM router.
+
+    `sections` (optional, default None = previous behavior) carries the v2
+    rich-summary section windows with their title/summary text. When present,
+    candidates are grouped into one routing window per overlapping section
+    (ADR 0002 D4) and each window's section text rides along as the backend's
+    `captions_text` companion input (CONTRACT §2.2 mode A). Per ADR 0002 D5
+    the text GROUNDS the VLM's selection — it is a hint, never a keep/drop
+    gate: no frame is kept or dropped here based on section text.
 
     Returns SelectedFrame list sorted by timestamp_sec ascending. In dev mode no
     DB write happens; in prod mode the selected rows are persisted to
@@ -94,7 +121,7 @@ def select_keyframes(
         return []
 
     # Step 1: VLM routing decision per candidate (same order as candidates).
-    routings = _route_with_vlm(candidates)
+    routings = _route_with_vlm(candidates, sections)
     if not routings:
         return []
 
@@ -130,7 +157,10 @@ def select_keyframes(
     return sorted(selected, key=lambda s: s.candidate.timestamp_sec)
 
 
-def _route_with_vlm(candidates: list[FrameCandidate]) -> list[RoutingMetadata]:
+def _route_with_vlm(
+    candidates: list[FrameCandidate],
+    sections: Sequence[SectionContext | Mapping[str, Any]] | None = None,
+) -> list[RoutingMetadata]:
     """
     Run the local VLM router (Qwen2.5-VL) over the candidate frames.
 
@@ -139,8 +169,29 @@ def _route_with_vlm(candidates: list[FrameCandidate]) -> list[RoutingMetadata]:
     SLIDEGEN_VLM_BACKEND). The backend returns one routing dict per candidate in
     input order, which is mapped 1:1 onto RoutingMetadata.
 
+    With `sections` present, candidates are routed in one backend call per
+    window (a window = the candidates whose [t_start, t_end] interval best
+    overlaps that section — ADR 0002 D4/D6) and the window's section text is
+    passed as `captions_text`. Without sections (None/empty): a single call
+    with no companion text — exactly the previous behavior.
+
     Returns one RoutingMetadata per input candidate, in the same order.
     """
+    if not candidates:
+        return []
+
+    raw_routings: list[dict | None] = [None] * len(candidates)
+    for captions_text, indices in _window_candidates(candidates, sections):
+        window_raw = route_frames([candidates[i] for i in indices], captions_text)
+        if len(window_raw) != len(indices):
+            # Fail loud: a silent truncation would misalign frame ↔ routing.
+            raise ValueError(
+                f"VLM backend returned {len(window_raw)} routings for "
+                f"{len(indices)} window candidates"
+            )
+        for i, raw in zip(indices, window_raw):
+            raw_routings[i] = raw
+
     return [
         RoutingMetadata(
             is_slide=routing["is_slide"],
@@ -150,8 +201,84 @@ def _route_with_vlm(candidates: list[FrameCandidate]) -> list[RoutingMetadata]:
             summary_hint=routing["summary_hint"],
             confidence=routing["confidence"],
         )
-        for routing in route_frames(candidates)
+        for routing in raw_routings
+        if routing is not None
     ]
+
+
+def _coerce_section(raw: SectionContext | Mapping[str, Any]) -> SectionContext:
+    """Accept either a SectionContext or app.py's Section.model_dump() dict."""
+    if isinstance(raw, SectionContext):
+        return raw
+    return SectionContext(
+        index=int(raw.get("index", 0)),
+        from_sec=float(raw["from_sec"]),
+        to_sec=float(raw["to_sec"]),
+        title=str(raw.get("title") or ""),
+        summary=raw.get("summary"),
+    )
+
+
+def format_section_hint(section: SectionContext) -> str:
+    """One grounding line per section: "[{from}-{to}s] {title}: {summary}"."""
+    line = f"[{section.from_sec:g}-{section.to_sec:g}s] {section.title}"
+    if section.summary:
+        line += f": {section.summary}"
+    return line
+
+
+def _window_candidates(
+    candidates: list[FrameCandidate],
+    sections: Sequence[SectionContext | Mapping[str, Any]] | None,
+) -> list[tuple[str | None, list[int]]]:
+    """Group candidate indices into routing windows by section overlap.
+
+    Each candidate is assigned to the section whose [from_sec, to_sec] window
+    has the largest overlap with the candidate's [t_start, t_end] interval
+    (ADR 0002 D6 time provenance; ties → earlier section). Candidates that
+    overlap no section — and the whole list when `sections` is None/empty —
+    fall into a no-context window (captions_text=None), so every candidate is
+    ALWAYS routed: section text can never gate a frame out (ADR 0002 D5).
+
+    Returns [(captions_text | None, [original candidate indices]), ...] with
+    indices in input order within each window.
+    """
+    if not sections:
+        return [(None, list(range(len(candidates))))]
+
+    contexts = [_coerce_section(s) for s in sections]
+    grouped: dict[int | None, list[int]] = {}
+    for i, candidate in enumerate(candidates):
+        grouped.setdefault(_best_section(candidate, contexts), []).append(i)
+
+    windows: list[tuple[str | None, list[int]]] = []
+    for section_pos, indices in grouped.items():
+        text = None if section_pos is None else format_section_hint(contexts[section_pos])
+        windows.append((text, indices))
+    return windows
+
+
+def _best_section(
+    candidate: FrameCandidate, contexts: list[SectionContext]
+) -> int | None:
+    """Index (into contexts) of the section overlapping the candidate most.
+
+    Overlap is measured between the candidate's [t_start, t_end] interval and
+    the section's [from_sec, to_sec]; a touching boundary (overlap == 0)
+    counts so instant candidates sitting exactly on a section edge still get
+    context. Returns None when no section overlaps at all.
+    """
+    best: int | None = None
+    best_overlap = -1.0
+    for pos, section in enumerate(contexts):
+        overlap = min(candidate.t_end, section.to_sec) - max(
+            candidate.t_start, section.from_sec
+        )
+        if overlap < 0:
+            continue
+        if overlap > best_overlap:
+            best, best_overlap = pos, overlap
+    return best
 
 
 def _find_topic_alignment(

@@ -106,3 +106,39 @@ describe('model-endpoint keys (§5) — dev-mode live-token refusal', () => {
     ).toThrow(/prod\/opt-in only/);
   });
 });
+
+describe('OPENROUTER_API_KEY — prod-only refusal (LLM API ban, PR-F3)', () => {
+  it('defaults to undefined and treats empty string as unset', () => {
+    expect(parseEnv({ ...BASE_ENV }).OPENROUTER_API_KEY).toBeUndefined();
+    expect(parseEnv({ ...BASE_ENV, OPENROUTER_API_KEY: '' }).OPENROUTER_API_KEY).toBeUndefined();
+  });
+
+  it('refuses the key when SLIDEGEN_MODE=dev (explicit or defaulted)', () => {
+    expect(() =>
+      parseEnv({ ...BASE_ENV, SLIDEGEN_MODE: 'dev', OPENROUTER_API_KEY: 'sk-or-stub' })
+    ).toThrow(/prod-only \(LLM API ban\)/);
+    expect(() => parseEnv({ ...BASE_ENV, OPENROUTER_API_KEY: 'sk-or-stub' })).toThrow(
+      /OPENROUTER_API_KEY/
+    );
+  });
+
+  it('has NO opt-in escape: SLIDEGEN_VLM_BACKEND=http does not unlock it in dev', () => {
+    expect(() =>
+      parseEnv({
+        ...BASE_ENV,
+        SLIDEGEN_MODE: 'dev',
+        SLIDEGEN_VLM_BACKEND: 'http',
+        OPENROUTER_API_KEY: 'sk-or-stub',
+      })
+    ).toThrow(/LLM API ban/);
+  });
+
+  it('allows the key in prod mode', () => {
+    const config = parseEnv({
+      ...BASE_ENV,
+      SLIDEGEN_MODE: 'prod',
+      OPENROUTER_API_KEY: 'sk-or-stub',
+    });
+    expect(config.OPENROUTER_API_KEY).toBe('sk-or-stub');
+  });
+});

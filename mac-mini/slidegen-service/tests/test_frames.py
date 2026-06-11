@@ -274,6 +274,30 @@ def test_gap_fill_specs_cover_all_empty_deciles():
         assert hi - lo == pytest.approx(duration / NUM_SECTIONS)
 
 
+def test_yolo_input_preserves_decile_coverage_after_downsample(scene_video):
+    """YOLO-boundary acceptance (ADR 0002 §3 correction, owner 2026-06-11):
+    implementation order is PySceneDetect → CPU downsample → DocLayout-YOLO,
+    so `extract_candidates`' return IS the future YOLO input. "전수" means
+    coverage COMPLETENESS, not duplicate inclusion — even when the downsample
+    is forced to cut below one-frame-per-decile, coverage repair must keep
+    every timeline decile represented in the list handed to YOLO."""
+    path, _, duration = scene_video
+    force_cut_target = NUM_SECTIONS // 2  # below decile count → cut is forced
+
+    yolo_input = extract_candidates(path, downsample_to=force_cut_target)
+
+    # (a) every decile keeps a representative frame (coverage repair held).
+    assert {c.section_index for c in yolo_input} == set(range(NUM_SECTIONS))
+    # (b) every decile is covered by a candidate interval (D6 provenance).
+    for section in range(NUM_SECTIONS):
+        assert _decile_covered_by_intervals(yolo_input, duration, section), (
+            f"decile {section} blanked at the YOLO boundary"
+        )
+    # (c) repair overshoots the forced target instead of blanking deciles,
+    #     and stays bounded (≤ target + one repair frame per decile).
+    assert NUM_SECTIONS <= len(yolo_input) <= force_cut_target + NUM_SECTIONS
+
+
 def test_downsample_coverage_repair_restores_lost_section():
     """The cut may not blank a section the merge still covered: the repair pass
     re-adds the sharpest merged frame of any lost section (recall-first)."""

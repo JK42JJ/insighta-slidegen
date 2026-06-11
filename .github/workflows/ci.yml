@@ -75,6 +75,14 @@ jobs:
 
       - run: npm ci
 
+      # PR-F3 build E2E (src/deck/orchestrate-runner.test.ts) runs the REAL
+      # vendored deck chain: deck_recipes.js needs pptxgenjs from the vendored
+      # deck/ package (not hoisted into the root node_modules). The validator
+      # (validate_deck.py) is stdlib-only and uses the runner's preinstalled
+      # python3 — no pip install needed here.
+      - name: Install vendored deck deps (pptxgenjs for the build E2E)
+        run: npm ci --prefix deck
+
       - name: Generate Prisma client
         run: npx prisma generate
 
