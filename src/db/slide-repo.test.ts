@@ -252,10 +252,10 @@ describe('deck persistence write path — slidegen tables only', () => {
     const ops = calls.map((c) => `${c.model}.${c.op}`);
     expect(ops).toEqual(['slide_figures.deleteMany', 'slide_figures.createMany']);
     const data = calls[1]!.args['data'] as Array<Record<string, unknown>>;
-    expect(data[0]).toMatchObject({
-      kind: 'equation',
-      extracted_latex: 'y = ax + b',
-      verification_status: 'unverified',
-    });
+    expect(data[0]).toMatchObject({ kind: 'equation', verification_status: 'unverified' });
+    // drift guard: these columns are NOT in the prod DDL yet — must stay out
+    // of the INSERT until the raw-DDL follow-up lands.
+    expect(data[0]).not.toHaveProperty('extracted_latex');
+    expect(data[0]).not.toHaveProperty('bbox');
   });
 });

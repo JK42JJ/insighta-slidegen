@@ -112,6 +112,11 @@ export async function replaceFigures(
   await prisma.$transaction([
     prisma.slide_figures.deleteMany({ where: { deck_id: deckId } }),
     prisma.slide_figures.createMany({
+      // extracted_latex / bbox are in the Prisma mirror but NOT in the prod
+      // DDL (drift verified 2026-06-11 — same family as slide_keyframes'
+      // routing-metadata columns). Until the raw-DDL follow-up lands, write
+      // only the columns that exist; the bundle still carries LaTeX/bbox to
+      // the deck build.
       data: figures.map((figure) => ({
         deck_id: deckId,
         cv_figure_id: figure.cv_figure_id,
@@ -124,8 +129,6 @@ export async function replaceFigures(
         atom_refs: jsonOrDbNull(figure.atom_refs),
         verification_status: figure.verification_status,
         extraction_conf: figure.extraction_conf ?? null,
-        extracted_latex: figure.extracted_latex ?? null,
-        bbox: jsonOrDbNull(figure.bbox),
       })),
     }),
   ]);
