@@ -6,7 +6,7 @@
  * Fixture: synthetic row in v2-summary.fixture.ts (no real YouTube ids).
  */
 import { describe, expect, it } from 'vitest';
-import { V2SummarySchema } from '@/types/slide-manifest';
+import { FigureRefSchema, V2SummarySchema } from '@/types/slide-manifest';
 import { SYNTHETIC_VIDEO_ID, makeV2Row } from '@/types/v2-summary.fixture';
 
 describe('V2SummarySchema', () => {
@@ -74,5 +74,40 @@ describe('V2SummarySchema', () => {
     expect(() => V2SummarySchema.parse(makeV2Row({ quality_flag: 'low' }))).toThrow();
     expect(() => V2SummarySchema.parse(makeV2Row({ transcript_used: false }))).toThrow();
     expect(() => V2SummarySchema.parse(makeV2Row({ video_id: 'short' }))).toThrow();
+  });
+});
+
+describe('FigureRefSchema — PR-F3 ResultResponse sync (bbox + verification_status)', () => {
+  const baseFigure = {
+    cv_figure_id: 'fig-001',
+    kind: 'chart',
+    png_url: 'https://example.invalid/crops/fig-001.png',
+  };
+
+  it('parses the extended shape (crop bbox + low-conf flag)', () => {
+    const parsed = FigureRefSchema.parse({
+      ...baseFigure,
+      bbox: { x: 10, y: 10, w: 120, h: 80 },
+      extraction_conf: 0.4,
+      verification_status: 'unverified',
+    });
+    expect(parsed.bbox).toEqual({ x: 10, y: 10, w: 120, h: 80 });
+    expect(parsed.verification_status).toBe('unverified');
+  });
+
+  it('stays backward compatible: pre-F3 rows parse, status defaults to pending', () => {
+    const parsed = FigureRefSchema.parse(baseFigure);
+    expect(parsed.bbox).toBeUndefined();
+    expect(parsed.verification_status).toBe('pending');
+  });
+
+  it('accepts bbox: null for whole-frame keyframe rows', () => {
+    const parsed = FigureRefSchema.parse({ ...baseFigure, kind: 'keyframe', bbox: null });
+    expect(parsed.bbox).toBeNull();
+  });
+
+  it('rejects a malformed bbox and an unknown verification status', () => {
+    expect(() => FigureRefSchema.parse({ ...baseFigure, bbox: { x: 1, y: 2 } })).toThrow();
+    expect(() => FigureRefSchema.parse({ ...baseFigure, verification_status: 'maybe' })).toThrow();
   });
 });
