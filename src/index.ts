@@ -8,23 +8,32 @@
  * Pipeline sequence (each step writes a slide_jobs row):
  *   1. resolve    — resolveCardToVideo (if --card) or identity (if --video)
  *   2. fetch_v2   — fetchV2 with v2/pass/transcript_used gate
- *   3. cv_extract — extractFigures via Mac Mini CV service
+ *   3. cv_extract — extractFigures via Mac Mini CV service (figures + resources)
  *   4. plan       — planSlides (deterministic, no LLM)
  *   5. persist    — upsertDeck + replaceSlides + replaceFigures
- *   6. build_slides — Python py/slides_build/deck_builder.py via child_process
- *   7. export_pdf   — Python py/slides_build/pdf_vector_compositor.py
+ *   6. deck_build — runOrchestrate (PR-F3): chart-regen pre-step + vendored
+ *                   orchestrate self-correction loop → .pptx artifact.
+ *                   Minimal DB scope here (status only) — artifact upload and
+ *                   full persistence land in PR-G.
  *
  * Hard rules:
- *   - No LLM API calls at any stage (CLAUDE.md §LLM API 호출 금지).
+ *   - No LLM API calls at any stage in dev (CLAUDE.md §LLM API 호출 금지).
+ *     The deck runner REFUSES to start without an llm: prod constructs the
+ *     OpenRouter closure from config (prod-only key); dev/test must inject a
+ *     stub — so this CLI is fail-closed in dev (no silent API path exists).
  *   - config is loaded once at startup; never read process.env inline.
  *   - plan→approve→execute: logs SlideOutline, pauses unless --yes.
  */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { parseArgs } from 'util';
 import { PrismaClient } from '@prisma/client';
 import { config } from '@/config';
 import { resolveCardToVideo } from '@/resolve/card-to-video';
 import { fetchV2 } from '@/fetch/v2-reader';
 import { extractFigures } from '@/cv/cv-client';
+import { runOrchestrate } from '@/deck/orchestrate-runner';
 import { planSlides } from '@/plan/slide-planner';
 import { upsertDeck, replaceSlides, replaceFigures, setDeckStatus } from '@/db/slide-repo';
 
@@ -72,11 +81,13 @@ async function main(): Promise<void> {
       title: s.title,
       summary: s.summary ?? undefined,
     }));
-    const figures = await extractFigures({
+    const cvResult = await extractFigures({
       youtube_video_id: youtubeVideoId,
       sections: cvSections,
       mode: config.SLIDEGEN_MODE,
+      title: summary.core.one_liner,
     });
+    const figures = cvResult.figures;
 
     // Step 4: deterministic slide plan
     const outline = planSlides(summary, figures, values.lang);
@@ -88,10 +99,27 @@ async function main(): Promise<void> {
     await replaceSlides(deckId, outline, prisma);
     await replaceFigures(deckId, figures, prisma);
 
-    // Steps 6-7: delegate to Python (deck_builder + pdf_vector_compositor)
-    // TODO: spawn Python subprocess with deckId, update deck status on completion
+    // Step 6: deck build (PR-F3) — chart-regen pre-step, then the vendored
+    // orchestrate FAIL→feedback→PASS loop on the CV resources bundle.
+    // The artifact stays a local path for now; upload + slide_jobs/slide_decks
+    // artifact persistence is PR-G scope.
     await setDeckStatus(deckId, 'building', null, prisma);
-    console.log(`[done] deckId=${deckId} — Python build step TODO`);
+    const artifactPath = path.join(os.tmpdir(), 'slidegen-artifacts', deckId, 'deck.pptx');
+    fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+    // No injected llm here: in prod, runOrchestrate builds the OpenRouter
+    // closure from config; in dev it throws BEFORE any vendored code runs
+    // (LLM API ban — dev deck builds happen via the CC-console skill instead).
+    const built = await runOrchestrate(cvResult.resources, artifactPath, config);
+    if (!built.ok) {
+      throw new Error(
+        `deck build failed validation after ${built.attempts} attempts:\n${built.report ?? ''}`
+      );
+    }
+    await setDeckStatus(deckId, 'done', null, prisma);
+    console.log(
+      `[done] deckId=${deckId} artifact=${artifactPath} ` +
+        `(type=${built.type}, attempts=${built.attempts})`
+    );
   } catch (err) {
     if (deckId !== undefined) {
       // Best-effort status update; ignore secondary errors

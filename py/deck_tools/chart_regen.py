@@ -160,3 +160,24 @@ def _normalize_series(raw: Any) -> list[tuple[str, list, list]]:
         if ys:
             out.append((str(entry.get("name") or ""), xs, ys))
     return out
+
+
+def main() -> int:
+    """CLI entry for the node deck runner pre-step (PR-F3).
+
+    Reads ONE JSON job from stdin: {"struct": <mode-B struct>, "out": "<png path>"}.
+    Writes {"png": "<written path>"} on success, or {"png": null} when the
+    struct is not regenerable — the caller then falls back to label-only,
+    NEVER to a raw frame (ADR 0003 P2).
+    """
+    import json
+    import sys
+
+    job = json.load(sys.stdin)
+    png = regenerate_chart(job.get("struct"), job["out"])
+    json.dump({"png": png}, sys.stdout)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

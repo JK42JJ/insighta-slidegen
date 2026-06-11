@@ -5,22 +5,25 @@ Endpoints:
     GET  /health              → {"status": "ok", "mode": "dev"|"prod"}
     POST /slides/generate     → {"job_id": "..."}
     GET  /slides/status       → {"job_id": ..., "status": ..., "progress_pct": ...}
-    GET  /slides/result       → {"job_id": ..., "figures": [...], "keyframe_count": ...}
+    GET  /slides/result       → {"job_id": ..., "figures": [...], "keyframe_count": ...,
+                                  "resources": {title, transcript, segments,
+                                                figureLabels, formulas, charts}}
 
 Mode gate (SLIDEGEN_MODE env var):
     dev  — vision API (Gemini etc.) hard-disabled. Only local CV runs.
            Returns placeholder figures so the TS pipeline can be tested end-to-end.
     prod — full pipeline including optional vision API fallback enabled.
 
-Pipeline (per job) — canonical order:
+Pipeline (per job) — canonical order (PR-F3 integration):
     1. acquire.py        → download video + extract raw frames for requested sections
     2. frames.py         → PySceneDetect wide-net extraction (~200 candidates)
                            + pHash/time-even CPU downsample (~60) — ADR 0002 D1/D3
     3. captions.py       → load captions, BGE-M3 embed segments, detect topic-change points
-    4. typing_select.py  → CLIP embed candidates + pgvector greedy dedup → ~12 selected frames
-                           (aligned with caption topic-change points; definite keep = new image + new topic)
-    5. figure_extract.py → YOLO layout detection + OCR (PaddleOCR / pix2tex) on selected ~12 only
-    6. redraw.py         → vector redraw (300 DPI SVG/PDF) for chart/diagram/equation figures
+    4. typing_select.py  → local VLM router selects ~12-20 keyframes, grounded by
+                           the v2 section summaries (HINT only — ADR 0002 D4/D5)
+    5. figure_extract.py → YOLO crop + Qwen numerization on the selected frames only
+    6. bundle.py         → orchestrate resources bundle (ADR 0003 §3) — stored on
+                           the job and returned in /slides/result `resources`
 
 Jobs run in a background thread pool; /slides/status polls the in-memory
 job store until done or error.
@@ -33,13 +36,14 @@ import uuid
 from typing import Any
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from acquire import download_frames
 from frames import extract_candidates
 from captions import detect_topic_changes
 from typing_select import select_keyframes
-from figure_extract import extract_figures as cv_extract_figures  # noqa: F401
+from figure_extract import ExtractedFigure, extract_figures as cv_extract_figures
+from bundle import assemble_resources
 from redraw import vector_redraw  # noqa: F401
 
 app = FastAPI(title="insighta-slidegen-cv", version="0.1.0")
@@ -69,6 +73,10 @@ class GenerateRequest(BaseModel):
     youtube_video_id: str
     sections: list[Section]
     mode: str = "dev"
+    # v2 passthrough for the orchestrate resources bundle (bundle.py). Defaults
+    # keep pre-PR-F3 callers (time bounds only) working unchanged.
+    title: str = ""
+    transcript: str = ""
 
 
 class GenerateResponse(BaseModel):
@@ -91,12 +99,22 @@ class FigureResult(BaseModel):
     caption: str | None = None
     timestamp_sec: int | None = None
     extraction_conf: float | None = None
+    # YOLO crop region in source-frame pixels (slide_figures.bbox shape);
+    # None for whole-frame `keyframe` rows.
+    bbox: dict | None = None
+    # 'unverified' iff extraction_conf < figure_extract.LOW_CONF_THRESHOLD
+    # (ADR 0003 D3 / ADR 0004 G3 — flagged, never silently embedded).
+    verification_status: str = "pending"
 
 
 class ResultResponse(BaseModel):
     job_id: str
     figures: list[FigureResult]
     keyframe_count: int
+    # Orchestrate resources bundle (bundle.RESOURCE_KEYS shape, JSON-safe):
+    # {title, transcript, segments, figureLabels, formulas, charts}.
+    # Consumed UNMODIFIED by deck/scripts/orchestrate.js via the node runner.
+    resources: dict[str, Any] = Field(default_factory=dict)
 
 
 # ----------------------------------------------------------------
@@ -125,7 +143,13 @@ def slides_generate(req: GenerateRequest, background_tasks: BackgroundTasks) -> 
             detail="Vision API disabled in dev mode (SLIDEGEN_MODE=dev)"
         )
     job_id = str(uuid.uuid4())
-    _jobs[job_id] = {"status": "queued", "progress_pct": 0.0, "figures": [], "keyframe_count": 0}
+    _jobs[job_id] = {
+        "status": "queued",
+        "progress_pct": 0.0,
+        "figures": [],
+        "keyframe_count": 0,
+        "resources": {},
+    }
     background_tasks.add_task(_run_pipeline, job_id, req)
     return GenerateResponse(job_id=job_id)
 
@@ -156,7 +180,106 @@ def slides_result(job_id: str) -> ResultResponse:
         job_id=job_id,
         figures=[FigureResult(**f) for f in job["figures"]],
         keyframe_count=job["keyframe_count"],
+        resources=job.get("resources", {}),
     )
+
+
+# ----------------------------------------------------------------
+# Stage-5 extraction clients (composition root — §5 gating lives here)
+# ----------------------------------------------------------------
+
+# Whole-frame mock "detection" box: deliberately larger than any real frame so
+# figure_extract._clamp_bbox reduces it to the full image (no model needed).
+MOCK_BOX_SPAN = 100_000
+MOCK_DETECTOR_VERSION = "mock-yolo-0"
+MOCK_VLM_CONFIDENCE = 0.9
+
+
+class MockYoloClient:
+    """Deterministic in-service detector stub — dev/CI default (no model).
+
+    Follows the vlm_router.MockBackend pattern: stable output so the dev
+    pipeline produces figures without a GPU or network. Duck-types
+    YoloHttpClient (`.detect(image_url) -> DetectResponse`).
+    """
+
+    def detect(self, image_url: str):
+        from model_clients import DetectResponse
+
+        return DetectResponse.model_validate(
+            {
+                "image": {"w": MOCK_BOX_SPAN, "h": MOCK_BOX_SPAN},
+                "model_version": MOCK_DETECTOR_VERSION,
+                "boxes": [
+                    {
+                        "bbox": {"x": 0, "y": 0, "w": MOCK_BOX_SPAN, "h": MOCK_BOX_SPAN},
+                        "class": "figure",
+                        "score": MOCK_VLM_CONFIDENCE,
+                    }
+                ],
+            }
+        )
+
+
+class MockVlmClient:
+    """Deterministic mode-B/C stub — dev/CI default (vlm_router mock pattern).
+
+    Returns a chart_regen-regenerable line-chart struct (mode B) and a fixed
+    LaTeX string (mode C). Duck-types VlmHttpClient's §2.2 methods.
+    """
+
+    def classify_crop(
+        self, image_url: str, prompt: str, caption_slice: str | None = None
+    ) -> dict:
+        return {
+            "kind": "chart",
+            "struct": {
+                "chart_type": "line",
+                "axes": {"x": "t", "y": "value"},
+                "series": [{"name": "mock", "points": [{"x": 0, "y": 0}, {"x": 1, "y": 1}]}],
+                "insight": "mock chart (dev placeholder)",
+            },
+            "confidence": MOCK_VLM_CONFIDENCE,
+        }
+
+    def equation_ocr(self, image_url: str, prompt: str) -> dict:
+        return {"latex": "y = ax + b", "confidence": MOCK_VLM_CONFIDENCE}
+
+
+def _build_extraction_clients() -> tuple[Any, Any]:
+    """(yolo, vlm) clients for figure_extract — chosen by env (§5 gating).
+
+    SLIDEGEN_VLM_BACKEND=http (explicit opt-in) → live contract clients via
+    from_env(), which enforces the dev-mode live-config refusal
+    (CONTRACT_model-endpoints §5). Anything else → the deterministic
+    in-service mocks above (dev/CI default: no model, no network).
+    """
+    if os.environ.get("SLIDEGEN_VLM_BACKEND", "").lower() == "http":
+        from model_clients import VlmHttpClient, YoloHttpClient
+
+        return YoloHttpClient.from_env(), VlmHttpClient.from_env()
+    return MockYoloClient(), MockVlmClient()
+
+
+def _figure_dict(figure: ExtractedFigure) -> dict:
+    """ExtractedFigure → FigureResult-shaped dict for the job store.
+
+    png_url carries the LOCAL crop path in dev — a data source, never a deck
+    asset (ADR 0003 P2); presigned upload URLs are the prod orchestrator's
+    job (PR-G).
+    """
+    return {
+        "cv_figure_id": figure.cv_figure_id,
+        "kind": figure.kind,
+        "png_url": figure.png_path,
+        "vector_pdf_url": None,
+        "vector_svg_url": None,
+        "caption": figure.caption,
+        "timestamp_sec": figure.timestamp_sec,
+        "extraction_conf": figure.extraction_conf,
+        "bbox": figure.bbox,
+        "verification_status": figure.verification_status,
+    }
 
 
 # ----------------------------------------------------------------
@@ -171,10 +294,10 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
         15%  acquire.download_frames(youtube_video_id, sections)
         30%  frames.extract_candidates(video_path)          → ~60 FrameCandidate
         45%  captions.detect_topic_changes(youtube_video_id) → topic-change points (BGE-M3)
-        65%  typing_select.select_keyframes(candidates, topic_points) → ~12 SelectedFrame
-        80%  figure_extract.extract_figures(selected_frames, mode)   → layout + OCR
-        95%  redraw.vector_redraw(figures)                  → 300 DPI vector output
-        100% Done — write figures to _jobs[job_id]["figures"]
+        65%  typing_select.select_keyframes(..., sections=...) → 12-20 SelectedFrame
+        80%  figure_extract.extract_figures(selected, yolo=, vlm=) → crops + struct/LaTeX
+        95%  bundle.assemble_resources(...) → orchestrate resources bundle
+        100% Done — figures + keyframe_count + resources on the job
 
     On exception: set status='error', error=str(e).
     """
@@ -186,7 +309,10 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
         frames_dir = download_frames(req.youtube_video_id, sections)
         _jobs[job_id]["progress_pct"] = 15.0
 
-        # Step 2: frames (30%) — PySceneDetect wide net → CPU downsample (~60)
+        # Step 2: frames (30%) — PySceneDetect wide net → CPU downsample (~60).
+        # NOTE: acquire does not expose the source's expected duration yet, so
+        # the frames.py duration-validation gate stays opt-in (None = skipped).
+        # Wire expected_duration_sec= here once acquire returns it.
         video_path = frames_dir / "video.mp4"
         candidates = extract_candidates(video_path)
         _jobs[job_id]["progress_pct"] = 30.0
@@ -195,22 +321,38 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
         topic_points = detect_topic_changes(req.youtube_video_id, req.mode)
         _jobs[job_id]["progress_pct"] = 45.0
 
-        # Step 4: typing_select (65%) — CLIP + topic alignment → ~12 keyframes
-        # NOTE: return value (selected keyframes) will feed step 5 (figure_extract)
-        # once implemented; in prod mode select_keyframes also persists them.
-        select_keyframes(candidates, topic_points, req.mode, sections=sections)
+        # Step 4: typing_select (65%) — VLM-routed selection, grounded by the
+        # v2 section text (HINT only, never a keep/drop gate — ADR 0002 D5).
+        selected = select_keyframes(candidates, topic_points, req.mode, sections=sections)
         _jobs[job_id]["progress_pct"] = 65.0
 
-        # Step 5-6: TODO (remaining stages)
-        # step 5 — figure_extract (yolo/ocr on selected)
-        # step 6 — redraw (vector 300dpi)
+        # Step 5: figure_extract (80%) — YOLO crop + Qwen numerization on the
+        # selected frames only. Clients are env-gated (http opt-in → live
+        # contract endpoints; default → in-service mocks).
+        yolo, vlm = _build_extraction_clients()
+        figures = cv_extract_figures(
+            selected, yolo=yolo, vlm=vlm, out_dir=frames_dir / "crops"
+        )
+        _jobs[job_id]["progress_pct"] = 80.0
 
-        # Placeholder output
+        # Step 6: bundle (95%) — orchestrate resources (TEXT/DATA/LaTeX only;
+        # raw frame pixels are banned from the bundle — ADR 0003 P2).
+        resources = assemble_resources(
+            title=req.title,
+            transcript=req.transcript,
+            segments=sections,
+            selected_frames=selected,
+            figures=figures,
+        )
+        _jobs[job_id]["progress_pct"] = 95.0
+
         _jobs[job_id].update({
             "status": "done",
             "progress_pct": 100.0,
-            "figures": [],
-            "keyframe_count": len(candidates),
+            "figures": [_figure_dict(f) for f in figures],
+            # The ~12-20 SELECTED keyframes — not the ~60 candidates.
+            "keyframe_count": len(selected),
+            "resources": resources,
         })
 
     except Exception as exc:

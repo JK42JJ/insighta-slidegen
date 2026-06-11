@@ -49,6 +49,12 @@ const envObjectSchema = z.object({
   VISION_API_PROVIDER: z.enum(['gemini', 'none']).default('none'),
   GEMINI_API_KEY: z.string().optional(),
 
+  // OpenRouter key for the deck-runner llm closure — PROD-ONLY (LLM API ban).
+  // Dev/test must inject a stub llm instead; the superRefine below REFUSES
+  // this key in dev mode (mirror of the vision-key prod-only gating). There
+  // is NO opt-in escape: OpenRouter is an LLM API, not a model endpoint.
+  OPENROUTER_API_KEY: emptyAsUndefined(z.string().optional()),
+
   // ── Model endpoints (docs/CONTRACT_model-endpoints.md v1.0 §5) ────────────
   // All optional/defaulted: unset = existing behavior (mock backend, no live
   // endpoints — CI-safe). "http" is the explicit opt-in to the live contract
@@ -71,6 +77,19 @@ const envObjectSchema = z.object({
 });
 
 const envSchema = envObjectSchema.superRefine((env, ctx) => {
+  // LLM API ban: OPENROUTER_API_KEY is refused in dev mode UNCONDITIONALLY
+  // (no http opt-in escape — OpenRouter is an LLM API, prod-service only).
+  // Dev/test code paths must inject a stub llm into the deck runner instead.
+  if (env.SLIDEGEN_MODE === 'dev' && env.OPENROUTER_API_KEY) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['OPENROUTER_API_KEY'],
+      message:
+        'OPENROUTER_API_KEY is set but SLIDEGEN_MODE=dev — the OpenRouter llm is ' +
+        'prod-only (LLM API ban): dev/test must inject a stub llm into the deck runner.',
+    });
+  }
+
   // §5 gating: live model-endpoint tokens are REFUSED in dev mode unless the
   // http backend was explicitly opted into. Dev/test/CI must never be able to
   // reach the live endpoints by accident (mirror of VISION_API_PROVIDER rule).

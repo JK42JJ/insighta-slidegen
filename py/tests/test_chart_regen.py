@@ -81,3 +81,38 @@ def test_struct_without_numeric_data_returns_none(tmp_path):
 
 def test_supported_kinds_are_the_mode_b_basic_set():
     assert SUPPORTED_CHART_TYPES == ("line", "bar", "scatter")
+
+
+# ── `python -m deck_tools.chart_regen` CLI (node runner pre-step, PR-F3) ──────
+
+
+def _run_cli(job: dict) -> dict:
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "deck_tools.chart_regen"],
+        input=json.dumps(job),
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=Path(__file__).resolve().parents[1],  # py/ — module resolution root
+    )
+    return json.loads(proc.stdout)
+
+
+def test_cli_regenerates_supported_struct(tmp_path):
+    out = tmp_path / "cli_line.png"
+    assert _run_cli({"struct": LINE_STRUCT, "out": str(out)}) == {"png": str(out)}
+    assert out.exists()
+
+
+def test_cli_unsupported_struct_returns_null_for_label_only_fallback(tmp_path):
+    """Regen None → {"png": null}: the runner falls back to label-only, never
+    to a raw frame (ADR 0003 P2)."""
+    out = tmp_path / "cli_nope.png"
+    job = {"struct": {"chart_type": "pie3d-unsupported", "series": []}, "out": str(out)}
+    assert _run_cli(job) == {"png": None}
+    assert not out.exists()

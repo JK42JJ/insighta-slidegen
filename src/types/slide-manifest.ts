@@ -168,6 +168,16 @@ export type Layout = z.infer<typeof LayoutEnum>;
 // FigureRef — CV service → slidegen contract
 // ----------------------------------------------------------------
 
+/** YOLO crop region in source-frame pixels (slide_figures.bbox shape, PR-F3). */
+export const FigureBboxSchema = z.object({
+  x: z.number().int(),
+  y: z.number().int(),
+  w: z.number().int(),
+  h: z.number().int(),
+});
+
+export type FigureBbox = z.infer<typeof FigureBboxSchema>;
+
 /** A figure produced by the CV service, ready to embed in a slide. */
 export const FigureRefSchema = z.object({
   cv_figure_id: z.string(),
@@ -181,6 +191,17 @@ export const FigureRefSchema = z.object({
   extraction_conf: z.number().min(0).max(1).optional(),
   /** Equation OCR (UniMERNet) LaTeX for kind='equation' figures (ADR 0001). */
   extracted_latex: z.string().optional(),
+  /**
+   * YOLO crop region (PR-F3 ResultResponse sync) — null/absent for
+   * whole-frame `keyframe` rows.
+   */
+  bbox: FigureBboxSchema.nullable().optional(),
+  /**
+   * 'unverified' iff extraction_conf < LOW_CONF_THRESHOLD (0.7) — flagged,
+   * never silently embedded (ADR 0003 D3 / ADR 0004 G3). 'verified' is
+   * human-set.
+   */
+  verification_status: z.enum(['pending', 'unverified', 'verified']).default('pending'),
 });
 
 export type FigureRef = z.infer<typeof FigureRefSchema>;
