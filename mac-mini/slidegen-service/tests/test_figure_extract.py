@@ -336,3 +336,24 @@ def test_crop_contract_error_skips_crop_not_video(tmp_path):
 
     assert len(figures) == 1
     assert figures[0].kind == "chart"
+
+
+def test_text_and_photo_crops_are_dropped_not_shipped(tmp_path):
+    """PR-H2: the prompt lets Qwen answer text/photo to veto detector
+    over-detections (§3.4) — those kinds are not in FigureRefSchema and must
+    never leave the service (found live: kind='text' broke the TS boundary)."""
+    yolo = make_yolo_stub(
+        [
+            {"bbox": {"x": 0, "y": 0, "w": 100, "h": 80}, "class": "plain text", "score": 0.8},
+            {"bbox": {"x": 150, "y": 50, "w": 100, "h": 80}, "class": "figure", "score": 0.5},
+        ]
+    )
+    vlm = VlmStub()
+    vlm.script_content(
+        json.dumps({"kind": "text", "struct": {}, "confidence": 0.95}),
+        CHART_REPLY,
+    )
+
+    figures = run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path)
+
+    assert [f.kind for f in figures] == ["chart"]

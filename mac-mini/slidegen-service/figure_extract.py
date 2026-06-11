@@ -70,6 +70,10 @@ VERIFICATION_UNVERIFIED = "unverified"
 # Mode-B kind that routes a crop to mode-C equation OCR. The kind authority is
 # Qwen's mode-B decision — never YOLO's advisory class (ADR 0002 D2/D7).
 EQUATION_KIND = "equation"
+# Mode-B kinds that ARE deck figures (FigureRefSchema enum, slide-manifest.ts).
+# The prompt also offers "text"/"photo" as VETO answers for detector
+# over-detections (§3.4) — those crops are dropped, never shipped.
+MODE_B_FIGURE_KINDS = frozenset({"chart", "diagram", "table", "equation", "screenshot"})
 # Kind recorded for unflagged frames (no crop, keyframe row only).
 KEYFRAME_KIND = "keyframe"
 
@@ -213,6 +217,17 @@ def extract_figures(
                 sys.stderr.write(
                     f"figure_extract: crop contract error skipped "
                     f"(t={timestamp}s box={box_index}): {exc}\n"
+                )
+                continue
+
+            # §3.4 cleanup: the prompt lets Qwen answer "text"/"photo" so it
+            # can VETO detector over-detections — those crops are not deck
+            # figures (raw text rides the transcript; photos are b-roll).
+            # Only FigureRef kinds may leave the service.
+            if kind not in MODE_B_FIGURE_KINDS:
+                sys.stderr.write(
+                    f"figure_extract: non-figure crop dropped "
+                    f"(t={timestamp}s box={box_index} kind={kind})\n"
                 )
                 continue
 
