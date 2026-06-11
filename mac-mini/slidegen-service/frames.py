@@ -10,9 +10,10 @@ an extraction *index*, not a time, into filenames).
 
 Pipeline shape (ADR 0002 D3, ADR 0003 D5 — recall-first):
 
-    1. WIDE NET  — one candidate per detected scene start, plus gap-fill grabs
-       so every timeline decile is covered (~target 200; over-extraction is
-       fine — a *missed* slide transition is the only unrecoverable failure).
+    1. WIDE NET  — the scene start plus duration-proportional mid-scene samples
+       per detected scene, plus gap-fill grabs so every timeline decile is
+       covered (~target 200; over-extraction is fine — a *missed* slide
+       transition is the only unrecoverable failure).
     2. CPU DOWNSAMPLE — pHash near-duplicate merge + time-even cut to ~60,
        implemented as a separate pure function (`downsample_candidates`) so the
        wide net and the cut are independently testable.
@@ -46,12 +47,37 @@ DOWNSAMPLE_TARGET_COUNT = 60
 # Timeline buckets (deciles) for section_index / coverage gap-fill.
 NUM_SECTIONS = 10
 
-# PySceneDetect ContentDetector sensitivity (ADR 0002 D1). The library default
-# (27) finds very few cuts on lecture/slide video with no hard transitions
-# (fades / pen build-up need th≈3–15); the ts1 scratch lab measured
-# threshold≈15 → full 10/10-decile coverage (vs 2/10 at 27). Lower = more
-# boundaries. Measured starting point — adjust only with new measurements.
-SCENE_DETECT_THRESHOLD = 15.0
+# PySceneDetect ContentDetector sensitivity (ADR 0002 D1). ContentDetector
+# measures the FRAME-AVERAGED HSV delta between frames, so the right threshold is
+# CONTENT-TYPE dependent (troubleshooting #24):
+#   - lecture-hall CAMERA footage has lots of motion → a high threshold (≈27)
+#     still finds the slide cuts;
+#   - a WHITE-BACKGROUND SCREENCAST changes only a small text region between
+#     slides, so a real slide swap's averaged delta is SMALL — at threshold 15
+#     (let alone 27) those transitions go undetected and many minutes of distinct
+#     slides COLLAPSE into a single scene (measured: a ~23-minute span of dozens of
+#     real slides detected as ONE scene), silently dropping the slides between.
+# A single global default must therefore err LOW and let the downstream pHash
+# merge + time-even cut DEDUP the resulting over-segmentation (recall-first: a
+# missed transition is unrecoverable, an extra near-dup is cheaply deduped).
+# Measured on a 53-minute screencast: th=8 → 82 scenes / full 10/10-decile
+# coverage, vs the whole first third collapsing into one scene at th=15.
+SCENE_DETECT_THRESHOLD = 8.0  # was 15 (under-segments white-bg screencast); see #24
+
+# Within a scene we sample MULTIPLE candidate instants, not just the scene start.
+# On lecture-hall recordings scene cuts track CAMERA motion, so the start frame
+# can be the speaker while a figure/equation appears MID-scene; a start-only grab
+# would MISS it (the only unrecoverable failure, ADR 0003 D5). Over-sampling is
+# free on the recall axis here — the pHash merge collapses the near-dups and the
+# downsample cuts the global set, so the extra frames never reach the VLM.
+SCENE_SAMPLE_STEP_SEC = 2.5      # cadence of candidate samples within a scene
+MAX_SAMPLES_PER_SCENE = 10       # baseline cap for normal-length scenes
+# A flat per-scene cap STARVES an under-segmented long scene (e.g. a white-bg
+# screencast whose swaps slipped under the detector → 23 min in one scene):
+# capping at 10 keeps ~1 frame per 2.3 min and drops the slides between. So the
+# cap scales with scene DURATION — never let the sampling gap exceed this — as a
+# defense-in-depth net even when the threshold mis-segments (troubleshooting #24).
+LONG_SCENE_MAX_GAP_SEC = 20.0    # in a long scene, sample at least once per ~20s
 
 # --- pHash (CPU downsample stage, ADR 0002 D3) ------------------------------
 # 32×32 DCT → top-left 8×8 low-frequency block → 64-bit hash. Implemented with
@@ -119,8 +145,9 @@ def extract_candidates(
         1. Duration gate — if expected_duration_sec is given, fail loud when the
            file's actual duration grossly mismatches it (partial download).
         2. PySceneDetect ContentDetector (SCENE_DETECT_THRESHOLD) → scene list
-           with exact timecodes; one candidate per scene start, carrying the
-           scene's [t_start, t_end] interval.
+           with exact timecodes; the scene start plus duration-proportional
+           mid-scene samples, each carrying the scene's [t_start, t_end]
+           interval (recall-first — a mid-scene figure is not missed).
         3. Recall-first gap-fill (ADR 0003 D5): every timeline decile with no
            candidate gets a grab at its midpoint so the VLM sees the full talk
            even on sparse-cut / static video.
@@ -148,10 +175,12 @@ def extract_candidates(
     if not scenes:
         scenes = [(0.0, duration)]
 
-    # One spec per scene start: (timestamp, t_start, t_end, is_scene_boundary).
-    specs: list[tuple[float, float, float, bool]] = [
-        (start, start, end, True) for start, end in scenes
-    ]
+    # Multiple specs per scene (timestamp, t_start, t_end, is_scene_boundary):
+    # the scene start (the transition) plus duration-proportional mid-scene
+    # samples so a figure that appears mid-scene survives (recall-first).
+    specs: list[tuple[float, float, float, bool]] = []
+    for start, end in scenes:
+        specs.extend(_scene_sample_specs(start, end))
 
     # Step 3: recall-first decile gap-fill.
     specs.extend(_gap_fill_specs(specs, duration))
@@ -251,6 +280,38 @@ def _timecode_seconds(tc) -> float:
     """
     seconds = getattr(tc, "seconds", None)
     return float(seconds) if seconds is not None else float(tc.get_seconds())
+
+
+def _scene_sample_specs(
+    start: float, end: float
+) -> list[tuple[float, float, float, bool]]:
+    """Candidate (timestamp, t_start, t_end, is_scene_boundary) specs for one scene.
+
+    Always emits the scene START (the transition frame, is_scene_boundary=True),
+    then evenly-spaced mid-scene samples. The per-scene sample count is
+    duration-proportional: the spacing never exceeds LONG_SCENE_MAX_GAP_SEC, so an
+    under-segmented long scene is densely sampled instead of starved at a flat cap
+    (troubleshooting #24). Every sample carries the WHOLE scene interval
+    [start, end] as its provenance (ADR 0002 D6); the pHash merge collapses the
+    near-dups and widens the survivor's interval. Short scenes (<= one step)
+    collapse to just the start, so there is no regression vs start-only behaviour.
+    """
+    specs = [(start, start, end, True)]
+    span = max(end - start, 0.0)
+    if span <= SCENE_SAMPLE_STEP_SEC:
+        return specs
+    # Cap scales with duration so the gap stays <= LONG_SCENE_MAX_GAP_SEC; for a
+    # normal scene MAX_SAMPLES_PER_SCENE dominates. `-1` accounts for the start.
+    cap = max(MAX_SAMPLES_PER_SCENE, int(span // LONG_SCENE_MAX_GAP_SEC) + 1)
+    n_mid = min(int(span // SCENE_SAMPLE_STEP_SEC), cap - 1)
+    if n_mid <= 0:
+        return specs
+    step = span / (n_mid + 1)
+    for k in range(1, n_mid + 1):
+        t = start + step * k
+        if t < end - 0.5:  # guard so a mid sample never coincides with the next cut
+            specs.append((t, start, end, False))
+    return specs
 
 
 def _section_index(timestamp_sec: float, duration: float) -> int:

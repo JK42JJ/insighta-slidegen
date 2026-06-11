@@ -25,12 +25,16 @@ pytest.importorskip("scenedetect")
 
 from frames import (  # noqa: E402
     DOWNSAMPLE_TARGET_COUNT,
+    LONG_SCENE_MAX_GAP_SEC,
+    MAX_SAMPLES_PER_SCENE,
     NUM_SECTIONS,
+    SCENE_DETECT_THRESHOLD,
     FrameCandidate,
     VideoDurationMismatchError,
     _gap_fill_specs,
     _get_video_duration,
     _laplacian_score,
+    _scene_sample_specs,
     _section_index,
     compute_phash,
     downsample_candidates,
@@ -208,6 +212,49 @@ def test_static_video_full_coverage_no_crash(static_video):
     assert len(result) >= 1
     for section in range(NUM_SECTIONS):
         assert _decile_covered_by_intervals(result, duration, section)
+
+
+def test_scene_detect_threshold_low_for_screencast():
+    """The default threshold must stay LOW (<=8) so white-bg screencast slide
+    swaps are not collapsed into one scene (troubleshooting #24)."""
+    assert SCENE_DETECT_THRESHOLD <= 8.0
+
+
+def test_scene_sample_specs_short_scene_is_start_only():
+    """A scene shorter than one sample step yields only the start (no regression
+    vs the previous start-only behaviour)."""
+    specs = _scene_sample_specs(10.0, 11.5)  # 1.5s < SCENE_SAMPLE_STEP_SEC
+    assert specs == [(10.0, 10.0, 11.5, True)]
+
+
+def test_scene_sample_specs_normal_scene_multi_samples_within_cap():
+    """A normal-length scene emits the start + a few mid samples, never above the
+    baseline cap, each carrying the whole scene interval; only the start is a
+    boundary."""
+    start, end = 100.0, 130.0  # 30s
+    specs = _scene_sample_specs(start, end)
+
+    assert len(specs) >= 2
+    assert len(specs) <= MAX_SAMPLES_PER_SCENE
+    assert specs[0] == (start, start, end, True)
+    for t, ts, te, is_boundary in specs:
+        assert ts == start and te == end          # whole-scene provenance (D6)
+        assert start <= t < end
+    assert sum(1 for *_, b in specs if b) == 1     # exactly one boundary (start)
+
+
+def test_scene_sample_specs_long_scene_gap_bounded():
+    """An under-segmented long scene is sampled densely enough that the gap
+    between consecutive samples never exceeds LONG_SCENE_MAX_GAP_SEC — the
+    defense-in-depth net (troubleshooting #24)."""
+    start, end = 0.0, 1380.0  # 23 min collapsed into one scene
+    specs = _scene_sample_specs(start, end)
+
+    times = sorted(t for t, *_ in specs)
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    assert max(gaps) <= LONG_SCENE_MAX_GAP_SEC + 1e-6
+    # and far more than the flat baseline cap (would have been starved at 10)
+    assert len(specs) > MAX_SAMPLES_PER_SCENE
 
 
 def test_gap_fill_specs_cover_all_empty_deciles():
