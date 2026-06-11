@@ -110,6 +110,87 @@ export interface RunnerResult extends OrchestrateOutcome {
 /** Fresh-conversation retries after a builder crash (vendored-loop escape). */
 const BUILD_CRASH_RETRIES = 1;
 
+// ── Deterministic content normalization (PR-H2 live finding) ─────────────────
+// Sonnet repeatedly emits `metrics`/`scores` as an OBJECT MAP (or strings)
+// where the vendored kpis template requires [{value, unit?, label}] — and a
+// builder crash escapes the vendored feedback loop. The harness normalizes
+// the LLM text BEFORE the vendored parser sees it (deck/ stays byte-stable,
+// ADR 0003 D7). Faithful transforms only — nothing is invented.
+
+/** Recipe keys the kpis template renders as stat arrays. */
+const STAT_ARRAY_KEYS = ['metrics', 'scores'] as const;
+
+function coerceStatEntry(entry: unknown): Record<string, unknown> | null {
+  if (typeof entry === 'string') return { value: entry, label: '' };
+  if (typeof entry === 'number') return { value: String(entry), label: '' };
+  if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
+    const record = entry as Record<string, unknown>;
+    if (record['value'] !== undefined) {
+      return { ...record, value: String(record['value']) };
+    }
+    // {label: value}-shaped single pair → one stat
+    const pairs = Object.entries(record);
+    if (pairs.length === 1 && typeof pairs[0]![1] !== 'object') {
+      return { label: pairs[0]![0], value: String(pairs[0]![1]) };
+    }
+  }
+  return null;
+}
+
+/** Normalize fragile stat fields of a content JSON; non-JSON passes through. */
+export function normalizeDeckContent(raw: string): string {
+  const candidates = [raw.trim()];
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(raw);
+  if (fenced?.[1]) candidates.push(fenced[1].trim());
+  const first = raw.indexOf('{');
+  const last = raw.lastIndexOf('}');
+  if (first >= 0 && last > first) candidates.push(raw.slice(first, last + 1));
+
+  for (const candidate of candidates) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return raw;
+    const content = parsed as Record<string, unknown>;
+    let changed = false;
+    for (const key of STAT_ARRAY_KEYS) {
+      const value = content[key];
+      if (value === undefined || value === null) continue;
+      if (Array.isArray(value)) {
+        const coerced = value.map(coerceStatEntry).filter((v) => v !== null);
+        if (coerced.length !== value.length || coerced.some((v, i) => v !== value[i])) {
+          if (coerced.length > 0) content[key] = coerced;
+          else delete content[key];
+          changed = true;
+        }
+        continue;
+      }
+      if (typeof value === 'object') {
+        // object map {label: value, ...} → [{label, value}]
+        content[key] = Object.entries(value as Record<string, unknown>)
+          .filter(([, v]) => typeof v !== 'object')
+          .map(([label, v]) => ({ label, value: String(v) }));
+        changed = true;
+        continue;
+      }
+      // bare string/number — not renderable as a stat row
+      delete content[key];
+      changed = true;
+    }
+    return changed ? JSON.stringify(content) : raw;
+  }
+  return raw;
+}
+
+/** Wrap an llm so every reply passes the deterministic normalizer. */
+function withContentNormalizer(llm: LlmFn): LlmFn {
+  return async (messages: LlmMessage[]): Promise<string> =>
+    normalizeDeckContent(await llm(messages));
+}
+
 export interface RunnerOptions {
   /** Injected llm (REQUIRED in dev/test; prod may rely on OPENROUTER_API_KEY). */
   llm?: LlmFn;
@@ -202,7 +283,8 @@ export async function runOrchestrate(
   options: RunnerOptions = {}
 ): Promise<RunnerResult> {
   // 1. llm FIRST — the refusal path must trigger before any vendored code.
-  const llm = buildLlm(config, options.llm);
+  //    Every reply passes the deterministic stat-shape normalizer.
+  const llm = withContentNormalizer(buildLlm(config, options.llm));
 
   // 2. chart-regen pre-step (failure → label-only, never raw frames).
   const chartAssets = regenCharts(

@@ -30,6 +30,7 @@ import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
   buildLlm,
+  normalizeDeckContent,
   regenCharts,
   runOrchestrate,
   vendoredValidatorPath,
@@ -177,7 +178,11 @@ describe('llm gating — vendored callOpenRouter default is unreachable from the
   });
 
   it('ALWAYS passes the injected llm to orchestrate (default param never engages)', async () => {
-    const stub: LlmFn = () => Promise.resolve('{}');
+    let stubCalls = 0;
+    const stub: LlmFn = () => {
+      stubCalls += 1;
+      return Promise.resolve('{}');
+    };
     let receivedLlm: LlmFn | undefined;
     const impl: OrchestrateFn = (_resources, out, opts) => {
       receivedLlm = opts.llm;
@@ -189,8 +194,12 @@ describe('llm gating — vendored callOpenRouter default is unreachable from the
       llm: stub,
       orchestrateImpl: impl,
     });
-    // Identity check: orchestrate received OUR closure, not a vendored default.
-    expect(receivedLlm).toBe(stub);
+    // Behavior check: orchestrate received a defined llm whose replies come
+    // from OUR injected stub (wrapped by the deterministic normalizer — so
+    // identity is intentionally NOT the contract), never a vendored default.
+    expect(receivedLlm).toBeDefined();
+    await expect(receivedLlm!([{ role: 'user', content: 'ping' }])).resolves.toBe('{}');
+    expect(stubCalls).toBe(1);
   });
 
   it('prod + OPENROUTER_API_KEY builds the prod-only closure without network', () => {
@@ -297,5 +306,45 @@ describe('builder-crash retry (vendored-loop escape — PR-H2 live finding)', ()
         { llm: async () => '[]', orchestrateImpl }
       )
     ).rejects.toThrow('stats.slice');
+  });
+});
+
+describe('normalizeDeckContent — deterministic stat-shape repair (PR-H2)', () => {
+  it('object-map metrics → [{label, value}] array', () => {
+    const raw = JSON.stringify({ title: 't', metrics: { 다운로드: '300만', 별점: 4.8 } });
+    const out = JSON.parse(normalizeDeckContent(raw)) as { metrics: unknown };
+    expect(out.metrics).toEqual([
+      { label: '다운로드', value: '300만' },
+      { label: '별점', value: '4.8' },
+    ]);
+  });
+
+  it('string entries inside a metrics array → {value, label} objects', () => {
+    const raw = JSON.stringify({ metrics: ['300만 다운로드', { value: 4.8, label: '별점' }] });
+    const out = JSON.parse(normalizeDeckContent(raw)) as { metrics: unknown };
+    expect(out.metrics).toEqual([
+      { value: '300만 다운로드', label: '' },
+      { value: '4.8', label: '별점' },
+    ]);
+  });
+
+  it('bare-string scores are dropped, valid arrays untouched, non-JSON passes through', () => {
+    const dropped = JSON.parse(
+      normalizeDeckContent(JSON.stringify({ scores: 'high' }))
+    ) as Record<string, unknown>;
+    expect(dropped).not.toHaveProperty('scores');
+
+    const valid = JSON.stringify({ metrics: [{ value: '1', label: 'a' }] });
+    expect(normalizeDeckContent(valid)).toBe(valid);
+
+    expect(normalizeDeckContent('not json at all')).toBe('not json at all');
+    const routing = JSON.stringify({ type: 'explainer' });
+    expect(normalizeDeckContent(routing)).toBe(routing);
+  });
+
+  it('repairs fenced JSON replies too', () => {
+    const raw = '```json\n{"metrics": {"속도": "3배"}}\n```';
+    const out = JSON.parse(normalizeDeckContent(raw)) as { metrics: unknown };
+    expect(out.metrics).toEqual([{ label: '속도', value: '3배' }]);
   });
 });
