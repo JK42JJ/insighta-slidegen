@@ -47,6 +47,27 @@ recovery), a single decode (~4× faster), full timeline coverage, and no
 empty-cluster crash. Slide screencasts (fades / pen build-up) need a very low
 threshold (`th≈3`). → **PySceneDetect is PRIMARY**; Katna is dropped.
 
+> **Amendment (2026-06-11, shipped in PR #27).** Two implementation specifics now
+> live in `frames.py`:
+> - **Default `SCENE_DETECT_THRESHOLD = 8`** (was 15). `ContentDetector` measures
+>   the *frame-averaged* HSV delta, so the right threshold is **content-type
+>   dependent**: lecture-hall camera footage tolerates ~27, but a **white-background
+>   screencast** changes only a small text region per slide — its averaged delta is
+>   tiny, so a high threshold *misses* slide swaps and collapses many minutes of
+>   distinct slides into one scene (measured: a ~23-minute span detected as a single
+>   scene). Default LOW (8) and let the downstream pHash + downsample dedup the
+>   over-segmentation (recall-first: a missed transition is unrecoverable, an extra
+>   near-dup is cheap). Measured on a 53-min screencast: th=8 → 82 scenes / full
+>   10/10-decile coverage.
+> - **Within-scene multi-sampling** (`_scene_sample_specs`): the wide net takes the
+>   scene start **plus duration-proportional mid-scene samples**, not the start
+>   only. On lecture-hall recordings cuts track *camera* motion, so the start frame
+>   can be the speaker while a figure appears mid-scene — a start-only grab would
+>   miss it. The per-scene sample count scales with duration (gap ≤
+>   `LONG_SCENE_MAX_GAP_SEC = 20`), so an under-segmented long scene is densely
+>   sampled rather than starved at a flat cap. Cost-neutral to the VLM: the pHash
+>   merge + downsample absorb the extra candidates.
+
 ### D2 — YOLO = WHERE, Qwen = WHAT (YOLO class label is NOT trusted)
 DocLayout-YOLO produces precise region boxes (spatial WHERE) with **no coordinate
 hallucination**, but its **class label is unreliable** (a 1-line equation looks
