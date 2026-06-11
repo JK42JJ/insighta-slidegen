@@ -23,9 +23,18 @@ git rev-parse --git-dir >/dev/null 2>&1 || cd "$(dirname "$0")/../.." || exit 2
 INPUT=$(cat 2>/dev/null || echo '{}')
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null || echo "")
 
+# The marker arrives as an inline prefix INSIDE the command string
+# (`SLIDEGEN_USER_OK=1 gh pr merge ...`). The hook runs as a separate process
+# BEFORE that command, so the prefix never reaches the hook's own env — detect
+# it in the command string (hook env kept as a fallback for direct invocation).
+marker_ok() {
+  [ "${SLIDEGEN_USER_OK:-}" = "1" ] && return 0
+  echo "$CMD" | grep -qE '(^|[[:space:];&|])SLIDEGEN_USER_OK=1[[:space:]]'
+}
+
 # `gh pr merge <N>` — irreversible to public main
 if echo "$CMD" | grep -qE '\bgh[[:space:]]+pr[[:space:]]+merge\b'; then
-  if [ "${SLIDEGEN_USER_OK:-}" = "1" ]; then
+  if marker_ok; then
     exit 0
   fi
   cat <<'EOF' >&2
@@ -41,7 +50,7 @@ fi
 
 # Force push — irreversible to remote history
 if echo "$CMD" | grep -qE '\bgit[[:space:]]+push\b.*--force(-with-lease)?\b'; then
-  if [ "${SLIDEGEN_USER_OK:-}" = "1" ]; then
+  if marker_ok; then
     exit 0
   fi
   cat <<'EOF' >&2
