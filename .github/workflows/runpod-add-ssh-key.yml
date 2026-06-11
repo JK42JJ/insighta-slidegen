@@ -1,0 +1,66 @@
+# RunPod account SSH-key add (workflow_dispatch only) — PR-H2 bootstrap support.
+#
+# RUNPOD_API_KEY is GH-Secrets-only, so account mutations must run in Actions.
+# This APPENDS a public key to the RunPod account's authorized keys (RunPod
+# injects account keys into running pods), so the operator can SSH-bootstrap
+# the pod (vLLM + YOLO, runpod/INSTALL.md). Existing keys are PRESERVED.
+#
+# A public key is not a secret (safe in a public log) — but the key is passed
+# as a dispatch input rather than hardcoded so this stays operator-scoped.
+
+name: runpod-add-ssh-key
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_pubkey:
+        description: 'SSH public key line to append to the RunPod account'
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  add-key:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Append the public key to the RunPod account (idempotent)
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          NEW_KEY: ${{ github.event.inputs.ssh_pubkey }}
+        run: |
+          set -euo pipefail
+          # 1) current account keys
+          curl -sf https://api.runpod.io/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $RUNPOD_API_KEY" \
+            -d '{"query":"query { myself { pubKey } }"}' > me.json
+          CURRENT=$(jq -r '.data.myself.pubKey // ""' me.json)
+
+          # 2) idempotent append (preserve existing keys)
+          KEY_ID=$(echo "$NEW_KEY" | awk '{print $1, $2}')
+          if echo "$CURRENT" | grep -qF "$KEY_ID"; then
+            echo "key already present — no change"
+            exit 0
+          fi
+          if [ -n "$CURRENT" ]; then
+            COMBINED="$CURRENT
+          $NEW_KEY"
+          else
+            COMBINED="$NEW_KEY"
+          fi
+
+          # 3) update via GraphQL variables (avoids quoting issues / log leak)
+          jq -n --arg pk "$COMBINED" \
+            '{query:"mutation($input: UpdateUserSettingsInput!){ updateUserSettings(input:$input){ id } }", variables:{input:{pubKey:$pk}}}' \
+            > mutation.json
+          HTTP=$(curl -s -o resp.json -w '%{http_code}' https://api.runpod.io/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $RUNPOD_API_KEY" \
+            --data @mutation.json)
+          echo "mutation http=$HTTP"
+          if [ "$HTTP" != "200" ] || jq -e '.errors' resp.json >/dev/null 2>&1; then
+            jq -r '.errors // "non-200"' resp.json
+            echo "::error::updateUserSettings failed"; exit 1
+          fi
+          echo "account SSH key appended"
