@@ -1,0 +1,69 @@
+# RunPod pod restart (workflow_dispatch only) — PR-H2 bootstrap support.
+#
+# Restarts the account's single pod (stop → resume) so a newly-added account
+# SSH key is injected into authorized_keys (RunPod injects account keys at
+# container start, not into already-running pods). RUNPOD_API_KEY is
+# GH-Secrets-only → must run in Actions.
+#
+# PUBLIC-repo safety: the pod id is pod-identifying, so it is NEVER passed as
+# an input (inputs are visible in run history) and NEVER echoed — the workflow
+# discovers the single pod itself. ABORTS if the account has != 1 pod (never
+# guesses which pod to bounce).
+
+name: runpod-restart-pod
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "type 'restart' to confirm the single-pod stop→resume"
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  restart:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Stop then resume the single pod (id never logged)
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          set -euo pipefail
+          [ "$CONFIRM" = "restart" ] || { echo "::error::confirm != 'restart'"; exit 1; }
+
+          gql() {
+            curl -sf https://api.runpod.io/graphql \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $RUNPOD_API_KEY" \
+              -d "$1"
+          }
+
+          gql '{"query":"query { myself { pods { id desiredStatus gpuCount } } }"}' > pods.json
+          COUNT=$(jq '.data.myself.pods | length' pods.json)
+          echo "account pods: $COUNT"
+          [ "$COUNT" = "1" ] || { echo "::error::expected exactly 1 pod, found $COUNT — aborting"; exit 1; }
+
+          PID=$(jq -r '.data.myself.pods[0].id' pods.json)        # never echoed
+          GPUS=$(jq -r '.data.myself.pods[0].gpuCount' pods.json)
+          echo "pre-restart status: $(jq -r '.data.myself.pods[0].desiredStatus' pods.json), gpuCount=$GPUS"
+
+          # stop
+          jq -n --arg id "$PID" '{query:"mutation($id:String!){ podStop(input:{podId:$id}){ id desiredStatus } }",variables:{id:$id}}' > stop.json
+          gql "$(cat stop.json)" > stopresp.json
+          jq -e '.errors' stopresp.json >/dev/null 2>&1 && { jq -r '.errors' stopresp.json; echo "::error::podStop failed"; exit 1; }
+          echo "stop requested: $(jq -r '.data.podStop.desiredStatus' stopresp.json)"
+          sleep 12
+
+          # resume (re-acquire the same gpu count)
+          jq -n --arg id "$PID" --argjson g "${GPUS:-1}" '{query:"mutation($id:String!,$g:Int!){ podResume(input:{podId:$id, gpuCount:$g}){ id desiredStatus } }",variables:{id:$id,g:$g}}' > resume.json
+          gql "$(cat resume.json)" > resumeresp.json
+          if jq -e '.errors' resumeresp.json >/dev/null 2>&1; then
+            jq -r '.errors' resumeresp.json
+            echo "::warning::podResume returned errors — GPU capacity may be unavailable; the pod is STOPPED. Resume manually from the console."
+            exit 1
+          fi
+          echo "resume requested: $(jq -r '.data.podResume.desiredStatus' resumeresp.json)"
+          echo "done — re-run recon for the new ports."
