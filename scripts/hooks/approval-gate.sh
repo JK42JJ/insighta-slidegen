@@ -15,6 +15,11 @@
 
 set -euo pipefail
 
+# Self-location guard: hook cwd follows the Bash tool's cwd. If that cwd is
+# OUTSIDE any git repo, anchor to this script's repo. When cwd IS inside a
+# repo/worktree, stay put — git checks must run against the CALLER's index.
+git rev-parse --git-dir >/dev/null 2>&1 || cd "$(dirname "$0")/../.." || exit 2
+
 INPUT=$(cat 2>/dev/null || echo '{}')
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null || echo "")
 
@@ -30,7 +35,8 @@ Re-run with the approval env, only after the user has typed an explicit
 "ok" / "approved" / "merge" in chat for THIS specific PR:
   SLIDEGEN_USER_OK=1 gh pr merge <N> --squash --delete-branch
 EOF
-  exit 1
+  # PreToolUse blocking code is 2 (1 is a non-blocking warning).
+  exit 2
 fi
 
 # Force push — irreversible to remote history
@@ -44,7 +50,7 @@ if echo "$CMD" | grep -qE '\bgit[[:space:]]+push\b.*--force(-with-lease)?\b'; th
 Re-run with (only after user explicit "ok"):
   SLIDEGEN_USER_OK=1 git push --force-with-lease <remote> <branch>
 EOF
-  exit 1
+  exit 2
 fi
 
 exit 0

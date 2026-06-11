@@ -17,6 +17,12 @@
 
 set -u
 
+# Self-location guard: hook cwd follows the Bash tool's cwd. If that cwd is
+# OUTSIDE any git repo, anchor to this script's repo. When cwd IS inside a
+# repo/worktree, stay put — the staged-diff check must run against the
+# CALLER's index (a worktree's index differs from the main checkout's).
+git rev-parse --git-dir >/dev/null 2>&1 || cd "$(dirname "$0")/../.." || exit 2
+
 INPUT=$(cat 2>/dev/null || echo '{}')
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null || echo "")
 
@@ -96,7 +102,8 @@ if [ -n "$VIOLATIONS" ]; then
   echo "" >&2
   echo "If this is a confirmed false positive:" >&2
   echo "  SLIDEGEN_ESSENTIALS_OK=1 <your command>" >&2
-  exit 1
+  # PreToolUse blocking code is 2 (1 is a non-blocking warning).
+  exit 2
 fi
 
 exit 0

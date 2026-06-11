@@ -23,6 +23,11 @@
 
 set -u
 
+# Self-location guard: hook cwd follows the Bash tool's cwd. If that cwd is
+# OUTSIDE any git repo, anchor to this script's repo (protected-path patterns
+# are repo-relative). When cwd IS inside a repo/worktree, stay put.
+git rev-parse --git-dir >/dev/null 2>&1 || cd "$(dirname "$0")/../.." || exit 2
+
 INPUT=$(cat 2>/dev/null || echo '{}')
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null || echo "")
 
@@ -40,7 +45,7 @@ if echo "$CMD" | grep -qE '(^|[[:space:];&|])git[[:space:]]+rm($|[[:space:]])'; 
   if echo "$CMD" | grep -qE '(^|[[:space:]])--cached($|[[:space:]])'; then
     exit 0
   fi
-  echo "🚫 BLOCKED: 'git rm' without '--cached' deletes the file from local disk too."
+  echo >&2 "🚫 BLOCKED: 'git rm' without '--cached' deletes the file from local disk too."
   echo ""
   echo "  - To untrack from git WITHOUT deleting from disk:"
   echo "      git rm --cached <path>"
@@ -48,26 +53,26 @@ if echo "$CMD" | grep -qE '(^|[[:space:];&|])git[[:space:]]+rm($|[[:space:]])'; 
   echo ""
   echo "If you genuinely need to delete from disk too:"
   echo "  SLIDEGEN_GIT_RM_OK=1 git rm <path>   # one-shot bypass"
-  exit 1
+  exit 2
 fi
 
 # === Case 2: bare `rm` on protected path ===
 if echo "$CMD" | grep -qE "(^|[[:space:];&|])rm([[:space:]]+-[a-zA-Z]+)*[[:space:]]+[^[:space:];&|]*${PROTECTED_RE}"; then
-  echo "🚫 BLOCKED: 'rm' on protected path."
+  echo >&2 "🚫 BLOCKED: 'rm' on protected path."
   echo ""
   echo "Protected: docs/, .claude/{commands,hooks,skills,agents}, scripts/hooks/, prisma/migrations/"
   echo ""
   echo "If genuinely necessary, get user approval, then:"
   echo "  SLIDEGEN_GIT_RM_OK=1 rm <path>"
-  exit 1
+  exit 2
 fi
 
 # === Case 3: find -delete on protected path ===
 if echo "$CMD" | grep -qE "find[[:space:]]+[^[:space:]]*${PROTECTED_RE}" && \
    echo "$CMD" | grep -qE -- '-delete([[:space:]]|$|;|\|)'; then
-  echo "🚫 BLOCKED: 'find ... -delete' on protected path."
+  echo >&2 "🚫 BLOCKED: 'find ... -delete' on protected path."
   echo "Same rules as 'rm' on protected paths above."
-  exit 1
+  exit 2
 fi
 
 exit 0
