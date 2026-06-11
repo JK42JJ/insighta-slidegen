@@ -166,7 +166,17 @@ flowchart TD
     SUB -.context (WHAT-disambig).-> QWEN
 ```
 
-> **Correction — implementation order (owner decision, 2026-06-11)**: the implemented order is **PySceneDetect → CPU downsample (D3) → DocLayout-YOLO** (YOLO detects on the ~60 downsampled frames, not the ~200 wide net, cutting GPU detect calls to ~1/3); "전수" means *coverage completeness*, not duplicate inclusion — the pHash merge preserves one representative per visual group (interval provenance, D6) and `tests/test_frames.py::test_yolo_input_preserves_decile_coverage_after_downsample` guards the YOLO-input boundary.
+> **Correction — implementation order (owner decision, 2026-06-11; revised 2026-06-11)**: the diagram above **and** the earlier correction (which put a single pHash + time-even downsample *before* YOLO, with YOLO detecting on only the ~60 cut frames) are **SUPERSEDED**. The validated implemented order is:
+>
+> **PySceneDetect → pHash (adjacent near-duplicate merge) → DocLayout-YOLO → CPU pre-select → Qwen3-VL.**
+>
+> The "CPU downsample" (D3) is **split into two passes *around* YOLO**, not a single pre-YOLO cut:
+> - **pHash near-duplicate merge (PRE-YOLO)** — collapses only *adjacent* held-frame repeats (~1000 → ~400). Cheap and content-blind; its only job is to keep YOLO off obvious duplicates. Coverage completeness is preserved: the merge keeps one representative per visual group with interval provenance (D6).
+> - **CPU pre-select (POST-YOLO)** — the real budget cut. It *consumes YOLO's boxes as signals*: a kind-weighted content score, a **talking-head gate** (no high-confidence figure AND no substantial text → drop a lecturer that YOLO mislabels as a low-confidence `figure`), an orthogonal **COCO person-detector** gate, a **global (non-adjacent) pHash** dedup, and a **coverage-budget** trim to the `TARGET_FRAMES` ceiling.
+>
+> **Why YOLO runs *before* the budget cut (not on a pre-cut ~60):** the smart cut *needs* YOLO's region boxes to tell a real slide from a lecturer/blank. A pre-YOLO pHash + time-even cut to ~60 is content-blind and would drop genuine slides (e.g. a large but low-confidence diagram) while keeping talking-heads. The trade is **more YOLO calls (~400 vs ~60, ≈250 s on CPU) for a content-aware cut** — validated on real lecture-hall and screencast videos. (Running YOLO on a pre-cut ~60 stays a possible *future* GPU-cost optimization, **not** the current design.)
+>
+> **Status:** this pre-select stage and its YOLO-signal gates are **validated in the scratch pipeline (`ts_preselect/preselect.py`, orchestrated by `ts_pipeline/run_pipeline.py`) and NOT yet in the repo**. Repo `frames.py` currently performs scene-detect + pHash/time-even downsample only; the pre-select stage + gates are a **carried repo-port work item**. This note records the target order so the ADR matches the validated design until the port lands. The `tests/test_frames.py` decile-coverage guard still applies to the pre-YOLO pHash merge (no decile dropped on the way into YOLO).
 
 | # | Stage | Tech | Module (repo, to port) |
 |---|-------|------|------------------------|
