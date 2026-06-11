@@ -63,10 +63,14 @@ async function main(): Promise<void> {
     // Step 3: CV figure extraction
     // segments is an OBJECT { sections, atoms } (real v2 shape) — and both
     // the column and sections may be null/absent on transcript-less rows.
+    // title/summary travel along as the Qwen select call's grounding text
+    // (ADR 0002 D5: caption/summary = HINT for selection, never a keep/drop gate).
     const cvSections = (summary.segments?.sections ?? []).map((s, i) => ({
       index: i,
       from_sec: s.from_sec,
       to_sec: s.to_sec,
+      title: s.title,
+      summary: s.summary ?? undefined,
     }));
     const figures = await extractFigures({
       youtube_video_id: youtubeVideoId,

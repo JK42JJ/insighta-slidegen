@@ -145,6 +145,8 @@ flowchart TD
     SUB -.context (WHAT-disambig).-> QWEN
 ```
 
+> **Correction — implementation order (owner decision, 2026-06-11)**: the implemented order is **PySceneDetect → CPU downsample (D3) → DocLayout-YOLO** (YOLO detects on the ~60 downsampled frames, not the ~200 wide net, cutting GPU detect calls to ~1/3); "전수" means *coverage completeness*, not duplicate inclusion — the pHash merge preserves one representative per visual group (interval provenance, D6) and `tests/test_frames.py::test_yolo_input_preserves_decile_coverage_after_downsample` guards the YOLO-input boundary.
+
 | # | Stage | Tech | Module (repo, to port) |
 |---|-------|------|------------------------|
 | 1 | Extract | **PySceneDetect** | `frames.py` (promote; Katna→drop) |

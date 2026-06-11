@@ -65,9 +65,17 @@ ROUTING_PROMPT = (
 
 
 class VLMRouterBackend(Protocol):
-    """A backend that routes candidate frames to per-frame routing dicts."""
+    """A backend that routes candidate frames to per-frame routing dicts.
 
-    def route(self, candidates: list[FrameCandidate]) -> list[dict]:
+    `captions_text` is the window's v2 section text (ADR 0002 D5) — companion
+    grounding text for the selection decision. Default None = existing
+    behavior; local backends (mock/transformers/mlx) may ignore it. It is a
+    HINT only — no backend may turn it into a keep/drop gate.
+    """
+
+    def route(
+        self, candidates: list[FrameCandidate], captions_text: str | None = None
+    ) -> list[dict]:
         ...
 
 
@@ -123,7 +131,11 @@ class MockBackend:
     def __init__(self, model: str = DEFAULT_MODEL) -> None:
         self.model = model
 
-    def route(self, candidates: list[FrameCandidate]) -> list[dict]:
+    def route(
+        self, candidates: list[FrameCandidate], captions_text: str | None = None
+    ) -> list[dict]:
+        # captions_text intentionally ignored: the mock is deterministic and
+        # captions are a hint, never a gate (ADR 0002 D5).
         out: list[dict] = []
         for i, candidate in enumerate(candidates):
             out.append(
@@ -165,7 +177,11 @@ class TransformersBackend:
             self.model, device_map="auto"
         )
 
-    def route(self, candidates: list[FrameCandidate]) -> list[dict]:
+    def route(
+        self, candidates: list[FrameCandidate], captions_text: str | None = None
+    ) -> list[dict]:
+        # captions_text accepted for protocol parity; the local transformers
+        # path does not inject it yet (hint only — ADR 0002 D5).
         if not candidates:
             return []
         from PIL import Image
@@ -209,7 +225,11 @@ class MLXBackend:
 
         self._model, self._processor = load(self.model)
 
-    def route(self, candidates: list[FrameCandidate]) -> list[dict]:
+    def route(
+        self, candidates: list[FrameCandidate], captions_text: str | None = None
+    ) -> list[dict]:
+        # captions_text accepted for protocol parity; the local mlx path does
+        # not inject it yet (hint only — ADR 0002 D5).
         if not candidates:
             return []
         from mlx_vlm import generate
@@ -263,13 +283,17 @@ class HttpBackend:
             self._client = VlmHttpClient.from_env(model=self.model)
         return self._client
 
-    def route(self, candidates: list[FrameCandidate]) -> list[dict]:
+    def route(
+        self, candidates: list[FrameCandidate], captions_text: str | None = None
+    ) -> list[dict]:
         if not candidates:
             return []
         client = self._ensure_client()
         image_urls = [_image_data_url(c.path) for c in candidates]
         prompt = build_routing_prompt(len(candidates))
-        raw = client.select_and_classify(image_urls, prompt)
+        # Window section text travels as the mode-A companion text part
+        # (CONTRACT §2.2 mode A); selection grounding HINT only (ADR 0002 D5).
+        raw = client.select_and_classify(image_urls, prompt, captions_text=captions_text)
         return [_normalize(r, c) for r, c in zip(raw, candidates)]
 
 
@@ -300,8 +324,14 @@ def get_backend(
     return backend_cls(model)
 
 
-def route_frames(candidates: list[FrameCandidate]) -> list[dict]:
-    """Route candidates via the configured backend. Returns [] for no input."""
+def route_frames(
+    candidates: list[FrameCandidate], captions_text: str | None = None
+) -> list[dict]:
+    """Route candidates via the configured backend. Returns [] for no input.
+
+    `captions_text` is the routed window's v2 section text (default None =
+    existing behavior). Grounding hint only — never a keep/drop gate.
+    """
     if not candidates:
         return []
-    return get_backend().route(candidates)
+    return get_backend().route(candidates, captions_text)
