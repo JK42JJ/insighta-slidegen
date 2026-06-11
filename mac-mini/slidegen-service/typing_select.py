@@ -33,6 +33,7 @@ upheld; this is an open-weights local model, not an API call).
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -101,6 +102,7 @@ def select_keyframes(
     topic_points: list[CaptionTopicPoint],
     mode: str = "dev",
     sections: Sequence[SectionContext | Mapping[str, Any]] | None = None,
+    youtube_video_id: str | None = None,
 ) -> list[SelectedFrame]:
     """
     Select 12-20 keyframes from the candidates via the local VLM router.
@@ -152,7 +154,7 @@ def select_keyframes(
 
     # Step 4: persist (prod only).
     if mode != "dev":
-        _persist_keyframes(selected)
+        _persist_keyframes(selected, youtube_video_id, sections)
 
     return sorted(selected, key=lambda s: s.candidate.timestamp_sec)
 
@@ -292,17 +294,77 @@ def _find_topic_alignment(
     return None, False
 
 
-def _persist_keyframes(selected: list[SelectedFrame]) -> None:
+def _section_index_for(
+    timestamp_sec: float,
+    sections: Sequence[SectionContext | Mapping[str, Any]] | None,
+) -> int:
+    """Section whose [from_sec, to_sec) window contains the timestamp (else 0)."""
+    for section in sections or []:
+        get = section.get if isinstance(section, Mapping) else lambda k, _s=section: getattr(_s, k, None)
+        from_sec, to_sec = get("from_sec"), get("to_sec")
+        if from_sec is None or to_sec is None:
+            continue
+        if float(from_sec) <= timestamp_sec < float(to_sec):
+            index = get("index")
+            return int(index) if index is not None else 0
+    return 0
+
+
+def _persist_keyframes(
+    selected: list[SelectedFrame],
+    youtube_video_id: str | None,
+    sections: Sequence[SectionContext | Mapping[str, Any]] | None = None,
+) -> None:
     """
     Persist selected frames to slidegen.slide_keyframes (prod only).
 
-    Writes the routing-metadata columns (frame_type, selection_score,
-    contains_graph, contains_equation, summary_hint, is_selected) — NO
-    clip_embedding (deprecated, ADR 0001).
+    Writes the routing-metadata columns that EXIST in the prod DDL
+    (slidegen-init/001): youtube_video_id, section_index, timestamp_sec,
+    frame_type, selection_score, is_selected — NO clip_embedding (deprecated,
+    ADR 0001). NOTE: the Prisma mirror also lists contains_graph /
+    contains_equation / summary_hint, but those columns are NOT in the prod
+    DB (verified 2026-06-11) — adding them is a raw-DDL follow-up.
 
-    Phase 2 prod stub: wire the psycopg2 INSERT (with youtube_video_id +
-    section_index) when the prod write path is implemented.
+    Best-effort like captions._persist_segments: a persistence hiccup is
+    logged, never fails the select stage. slide_* writes only.
     """
-    raise NotImplementedError(
-        "TODO (Phase 2 prod): INSERT routing metadata into slidegen.slide_keyframes"
-    )
+    import sys
+
+    if not selected or not youtube_video_id:
+        if selected and not youtube_video_id:
+            sys.stderr.write("persist_keyframes: no youtube_video_id — skipped\n")
+        return
+
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return
+
+    try:
+        import psycopg2
+    except ImportError:
+        sys.stderr.write("persist_keyframes: psycopg2 not installed — skipped\n")
+        return
+
+    try:
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        for frame in selected:
+            cur.execute(
+                """INSERT INTO slidegen.slide_keyframes
+                   (youtube_video_id, section_index, timestamp_sec, frame_type,
+                    selection_score, is_selected)
+                   VALUES (%s, %s, %s, %s, %s, TRUE)
+                   ON CONFLICT DO NOTHING""",
+                (
+                    youtube_video_id,
+                    _section_index_for(frame.candidate.timestamp_sec, sections),
+                    frame.candidate.timestamp_sec,
+                    frame.frame_type,
+                    frame.selection_score,
+                ),
+            )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as exc:  # noqa: BLE001 — best-effort persistence boundary
+        sys.stderr.write(f"persist_keyframes: failed ({exc}) — select stage continues\n")

@@ -357,7 +357,13 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
 
         # Step 4: typing_select (65%) — VLM-routed selection, grounded by the
         # v2 section text (HINT only, never a keep/drop gate — ADR 0002 D5).
-        selected = select_keyframes(candidates, topic_points, req.mode, sections=sections)
+        selected = select_keyframes(
+            candidates,
+            topic_points,
+            req.mode,
+            sections=sections,
+            youtube_video_id=req.youtube_video_id,
+        )
         _jobs[job_id]["progress_pct"] = 65.0
         stage = "numerize"
         _jobs[job_id]["stage"] = stage
