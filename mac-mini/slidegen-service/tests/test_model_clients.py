@@ -78,6 +78,8 @@ def test_mode_a_happy_path():
 
 def test_mode_a_request_shape():
     """§2.1: image_url parts, temperature 0, model from config, bearer auth."""
+    from model_clients import MAX_COMPLETION_TOKENS
+
     stub = VlmStub()
     stub.script_content('[{"is_slide": true}]')
     client = make_vlm_client(stub)
@@ -88,6 +90,8 @@ def test_mode_a_request_shape():
     payload = stub.request_payloads()[0]
     assert payload["temperature"] == 0
     assert payload["model"] == stub.model
+    # PR-H2: runaway-generation ceiling — measured >300 s/call without it.
+    assert payload["max_tokens"] == MAX_COMPLETION_TOKENS
     parts = payload["messages"][0]["content"]
     image_parts = [p for p in parts if p["type"] == "image_url"]
     text_parts = [p for p in parts if p["type"] == "text"]

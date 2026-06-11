@@ -67,6 +67,12 @@ DEFAULT_CONF_THRESHOLD = 0.15  # §3.2 LOW default = over-detect (ADR 0002 D2, r
 DEFAULT_MAX_BOXES = 50  # §3.2 optional guard
 
 ROUTING_TEMPERATURE = 0.0  # §2.1 — temperature 0 for ALL routing/classification calls
+# Completion ceiling (PR-H2 live finding): with no max_tokens the server may
+# generate to max-model-len — a runaway struct measured >300 s/call on the
+# serving GPU (read-timeout x3 killed the video). 4096 covers every §2.2 mode
+# reply with slack; a truncated runaway becomes a CONTRACT error, which the
+# per-crop skip absorbs. Tuning knob, not a secret.
+MAX_COMPLETION_TOKENS = 4096
 # §1 topology: Qwen3-VL-8B is the contract serving model (vlm_router keeps its
 # own local-backend default; this applies to from_env() construction only).
 DEFAULT_VLM_MODEL = "qwen3-vl-8b-instruct"
@@ -433,6 +439,7 @@ class VlmHttpClient:
         payload = {
             "model": self.model,
             "temperature": ROUTING_TEMPERATURE,  # §2.1 — always 0
+            "max_tokens": MAX_COMPLETION_TOKENS,  # runaway-generation ceiling
             "messages": messages,
         }
         response = _request_with_retry(
