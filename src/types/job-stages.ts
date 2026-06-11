@@ -24,6 +24,12 @@ export const JOB_STAGES = [
 export const JobStageSchema = z.enum(JOB_STAGES);
 export type JobStage = z.infer<typeof JobStageSchema>;
 
+/** slide_jobs.status domain (PR-G: timeout has NO status of its own —
+ * it is status='error' + last_error=TIMEOUT_ERROR + failure_stage). */
+export const JOB_STATUSES = ['queued', 'running', 'done', 'error'] as const;
+export const JobStatusSchema = z.enum(JOB_STATUSES);
+export type JobStatus = z.infer<typeof JobStatusSchema>;
+
 /** ADR 0004: failures concentrated here argue for the B switch (YOLO fine-tune). */
 export const RECOGNITION_STAGES = [
   'detect',
