@@ -157,6 +157,16 @@ jobs:
             echo "No mac-mini/slidegen-service/tests directory yet — skipping"
           fi
 
+      # The YOLO serving wrapper only needs fastapi/PIL/httpx at import time
+      # (the model itself is lazy-loaded) — already covered by the installs above.
+      - name: pytest — runpod/yolo-service/
+        run: |
+          if [ -d runpod/yolo-service/tests ]; then
+            pytest runpod/yolo-service/tests -v
+          else
+            echo "No runpod/yolo-service/tests directory yet — skipping"
+          fi
+
   # ── TypeScript build ─────────────────────────────────────────────────────────
   build:
     name: Build (tsc)

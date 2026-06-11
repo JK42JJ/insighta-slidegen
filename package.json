@@ -19,6 +19,7 @@
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "slidegen": "node dist/cli/index.js",
+    "measure": "tsx src/measure/cli.ts",
     "prisma:generate": "prisma generate",
     "prisma:studio": "prisma studio",
     "prepare": "lefthook install"

@@ -21,9 +21,10 @@
  * No direct vision API calls happen here; this client only speaks to the
  * FastAPI service which owns that decision.
  */
-import { config } from '@/config';
+import { z } from 'zod';
 import type { OrchestrateResources } from '@/deck/orchestrate-runner';
-import type { FigureRef } from '@/types/slide-manifest';
+import { JobStageSchema, type JobStage } from '@/types/job-stages';
+import { FigureRefSchema, type FigureRef } from '@/types/slide-manifest';
 
 export interface CvGenerateRequest {
   youtube_video_id: string;
@@ -69,43 +70,238 @@ export interface CvGenerateResult {
   resources: OrchestrateResources;
 }
 
+// ── PR-H2 wiring ──────────────────────────────────────────────────────────────
+
+/** Poll cadence for GET /slides/status (per the PR-H1 client design). */
+const POLL_INTERVAL_MS = 2_000;
+/** Default overall budget; real prod runs pass a larger opts.timeoutMs
+ * (acquire alone can take minutes on a long video). */
+const DEFAULT_TIMEOUT_MS = 300_000;
+/** Transient 5xx retry budget for the submit call (§2.3 mirror). */
+const SUBMIT_RETRIES = 2;
+
+/**
+ * A CV-service job failure with ADR 0004 stage attribution. `stage` is the
+ * service-reported failure_stage (or last-seen running stage on timeout);
+ * null = outside the stage domain → manual attribution in the report.
+ */
+export class CvExtractionError extends Error {
+  constructor(
+    message: string,
+    public readonly stage: JobStage | null
+  ) {
+    super(message);
+    this.name = 'CvExtractionError';
+  }
+}
+
+// Transport-boundary schemas (the service is trusted code but crosses a
+// network boundary — validate shape, fail loud on drift).
+const GenerateResponseSchema = z.object({ job_id: z.string().min(1) });
+
+const StatusResponseSchema = z.object({
+  job_id: z.string(),
+  status: z.enum(['queued', 'running', 'done', 'error']),
+  progress_pct: z.number(),
+  error: z.string().nullable().optional(),
+  stage: z.string().nullable().optional(),
+  failure_stage: z.string().nullable().optional(),
+});
+
+/**
+ * png_url relaxation: the service returns LOCAL crop paths until the
+ * presigned artifact-upload step lands (deferred §4 follow-up) — a bare path
+ * fails FigureRefSchema's `.url()`, so the transport boundary accepts any
+ * non-empty string and keeps the rest of the contract strict. The service
+ * also emits explicit nulls where the schema says "absent" — accepted here.
+ */
+const WireFigureSchema = FigureRefSchema.extend({
+  png_url: z.string().min(1),
+  vector_pdf_url: z.string().nullable().optional(),
+  vector_svg_url: z.string().nullable().optional(),
+  caption: z.string().nullable().optional(),
+  timestamp_sec: z.number().int().nullable().optional(),
+  extraction_conf: z.number().min(0).max(1).nullable().optional(),
+});
+
+const ResultResponseSchema = z.object({
+  job_id: z.string(),
+  figures: z.array(WireFigureSchema),
+  keyframe_count: z.number().int().nonnegative(),
+  resources: z
+    .object({
+      title: z.string(),
+      transcript: z.string(),
+      segments: z.array(z.unknown()),
+      figureLabels: z.array(z.unknown()),
+      formulas: z.array(z.unknown()),
+      charts: z.array(z.unknown()),
+    })
+    .passthrough(),
+});
+
+export interface CvClientOptions {
+  /** Overall submit→done budget. Default 300 s; measurement runs pass more. */
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  /**
+   * Endpoint override. When absent, resolved from src/config LAZILY at call
+   * time — modules importing this client stay loadable without a full env
+   * (the config singleton parses process.env at import; see config tests).
+   */
+  serviceUrl?: string;
+  serviceToken?: string;
+  /** Test seams. */
+  fetchImpl?: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function resolveEndpoint(
+  options: Pick<CvClientOptions, 'serviceUrl' | 'serviceToken'>
+): Promise<{ base: string; token: string }> {
+  if (options.serviceUrl !== undefined) {
+    return { base: options.serviceUrl.replace(/\/$/, ''), token: options.serviceToken ?? '' };
+  }
+  const { config } = await import('@/config');
+  return {
+    base: config.SLIDEGEN_CV_SERVICE_URL.replace(/\/$/, ''),
+    token: config.SLIDEGEN_CV_SERVICE_TOKEN,
+  };
+}
+
+function authHeaders(token: string): Record<string, string> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (token) {
+    headers['authorization'] = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+/** Service stage string → JobStage (anything off-domain degrades to null). */
+function parseStage(raw: string | null | undefined): JobStage | null {
+  return JobStageSchema.safeParse(raw).data ?? null;
+}
+
 /**
  * Submits a generate job to the CV service and polls until done.
  *
- * The service selects ~12 keyframes (not all ~80 candidates) via CLIP
- * embedding-distance dedup + BGE-M3 caption topic alignment.
- * result.keyframe_count reflects the ~12 selected frames.
- *
  * Algorithm:
- *   1. POST /slides/generate with CvGenerateRequest JSON body.
- *      Header: Authorization: Bearer SLIDEGEN_CV_SERVICE_TOKEN.
+ *   1. POST /slides/generate with CvGenerateRequest JSON body
+ *      (Authorization: Bearer SLIDEGEN_CV_SERVICE_TOKEN; 5xx retried).
  *   2. Poll GET /slides/status?job_id={id} every 2s until status='done'|'error'.
  *   3. GET /slides/result?job_id={id} → CvGenerateResult.
- *   4. Validate each FigureRef with FigureRefSchema.
- *   5. Return the full result (figures + keyframe_count + resources bundle).
+ *   4. Validate figures (wire-relaxed FigureRef) + resources bundle shape.
  *
- * @param _request - Video id + section list for frame extraction.
- * @returns Full CV result: validated figures (~12 selected keyframes) plus the
- *          orchestrate resources bundle for the deck runner (PR-F3).
- * @throws Error on service error, timeout (default 300s), or schema mismatch.
- *
- * TODO: implement — use fetch(); add exponential backoff on transient 5xx.
+ * @throws CvExtractionError carrying the ADR 0004 failure stage on job error
+ *         or timeout (stage = service failure_stage / last-seen stage).
  */
-export async function extractFigures(_request: CvGenerateRequest): Promise<CvGenerateResult> {
-  // config accessed at runtime for SLIDEGEN_CV_SERVICE_URL + TOKEN
-  void config;
-  throw new Error(
-    'TODO: extractFigures — POST /slides/generate, poll /slides/status, GET /slides/result'
+export async function extractFigures(
+  request: CvGenerateRequest,
+  options: CvClientOptions = {}
+): Promise<CvGenerateResult> {
+  const { base, token } = await resolveEndpoint(options);
+  const headers = authHeaders(token);
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const sleep = options.sleep ?? defaultSleep;
+  const now = options.now ?? Date.now;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS;
+
+  // 1. submit (transient 5xx retried, 4xx fails immediately)
+  let submitResponse: Response | undefined;
+  for (let attempt = 0; attempt <= SUBMIT_RETRIES; attempt++) {
+    submitResponse = await fetchImpl(`${base}/slides/generate`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(request),
+    });
+    if (submitResponse.status < 500) break;
+    if (attempt < SUBMIT_RETRIES) await sleep(pollIntervalMs);
+  }
+  if (!submitResponse || !submitResponse.ok) {
+    throw new CvExtractionError(
+      `cv service generate failed: HTTP ${submitResponse?.status ?? 'n/a'}`,
+      null
+    );
+  }
+  const { job_id: jobId } = GenerateResponseSchema.parse(await submitResponse.json());
+
+  // 2. poll until done/error/timeout
+  const deadline = now() + timeoutMs;
+  let lastSeenStage: JobStage | null = null;
+  for (;;) {
+    const statusResponse = await fetchImpl(
+      `${base}/slides/status?job_id=${encodeURIComponent(jobId)}`,
+      { headers }
+    );
+    if (!statusResponse.ok) {
+      throw new CvExtractionError(
+        `cv service status failed: HTTP ${statusResponse.status}`,
+        lastSeenStage
+      );
+    }
+    const status = StatusResponseSchema.parse(await statusResponse.json());
+    lastSeenStage = parseStage(status.stage) ?? lastSeenStage;
+
+    if (status.status === 'done') break;
+    if (status.status === 'error') {
+      throw new CvExtractionError(
+        `cv job failed: ${status.error ?? 'unknown error'}`,
+        parseStage(status.failure_stage) ?? lastSeenStage
+      );
+    }
+    if (now() >= deadline) {
+      // PR-G timeout convention: attribute to the stage the job died in.
+      throw new CvExtractionError(`cv job timeout after ${timeoutMs}ms`, lastSeenStage);
+    }
+    await sleep(pollIntervalMs);
+  }
+
+  // 3. result
+  const resultResponse = await fetchImpl(
+    `${base}/slides/result?job_id=${encodeURIComponent(jobId)}`,
+    { headers }
   );
+  if (!resultResponse.ok) {
+    throw new CvExtractionError(`cv service result failed: HTTP ${resultResponse.status}`, null);
+  }
+  const parsed = ResultResponseSchema.parse(await resultResponse.json());
+  // Normalize the service's explicit nulls to the FigureRef optional shape
+  // (downstream consumers expect absent, not null).
+  const figures: FigureRef[] = parsed.figures.map((f) => ({
+    ...f,
+    vector_pdf_url: f.vector_pdf_url ?? undefined,
+    vector_svg_url: f.vector_svg_url ?? undefined,
+    caption: f.caption ?? undefined,
+    timestamp_sec: f.timestamp_sec ?? undefined,
+    extraction_conf: f.extraction_conf ?? undefined,
+  }));
+  return {
+    job_id: parsed.job_id,
+    figures,
+    keyframe_count: parsed.keyframe_count,
+    resources: parsed.resources as unknown as OrchestrateResources,
+  };
 }
 
 /**
  * Health-checks the CV service. Returns true if /health responds 200.
  * Used by the orchestrator to decide whether to skip CV in dev with no service.
- *
- * TODO: implement — GET config.SLIDEGEN_CV_SERVICE_URL + "/health".
  */
-export async function isCvServiceHealthy(): Promise<boolean> {
-  void config;
-  throw new Error('TODO: isCvServiceHealthy — GET /health');
+export async function isCvServiceHealthy(
+  fetchImpl: typeof fetch = fetch,
+  serviceUrl?: string
+): Promise<boolean> {
+  try {
+    const { base } = await resolveEndpoint({ serviceUrl });
+    const response = await fetchImpl(`${base}/health`);
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
