@@ -114,8 +114,14 @@ def _load_caption_segments(youtube_video_id: str) -> list[CaptionSegment]:
     try:
         conn = psycopg2.connect(db_url)
         cur = conn.cursor()
+        # video_captions.video_id is a UUID FK → youtube_videos.id (insighta
+        # schema) — NOT the 11-char YouTube id; join to look up by YouTube id.
         cur.execute(
-            "SELECT segments FROM video_captions WHERE youtube_video_id = %s LIMIT 1",
+            """SELECT vc.segments
+               FROM video_captions vc
+               JOIN youtube_videos yv ON yv.id = vc.video_id
+               WHERE yv.youtube_video_id = %s
+               LIMIT 1""",
             (youtube_video_id,),
         )
         row = cur.fetchone()
@@ -227,12 +233,14 @@ def _persist_segments(
         for seg in segments:
             is_boundary = seg.from_sec in topic_timestamps
             embedding_json = json.dumps(seg.bge_embedding)
+            # ADR 0003 D6: no verbatim caption text — embedding + boundary flag
+            # only. Schema-qualified: slide_* tables live in `slidegen`.
             cur.execute(
-                """INSERT INTO slide_caption_segments
-                   (youtube_video_id, from_sec, to_sec, text, bge_embedding, is_topic_change)
-                   VALUES (%s, %s, %s, %s, %s, %s)
+                """INSERT INTO slidegen.slide_caption_segments
+                   (youtube_video_id, from_sec, to_sec, embedding, is_topic_change)
+                   VALUES (%s, %s, %s, %s::vector, %s)
                    ON CONFLICT DO NOTHING""",
-                (youtube_video_id, seg.from_sec, seg.to_sec, seg.text, embedding_json, is_boundary),
+                (youtube_video_id, seg.from_sec, seg.to_sec, embedding_json, is_boundary),
             )
 
         conn.commit()

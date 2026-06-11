@@ -140,12 +140,13 @@ model slide_keyframes {
 /// BGE-M3 caption segment embeddings for topic-change detection.
 /// Populated by captions.py (mac-mini CV service) before keyframe selection.
 /// embedding is 1024-dim (BAAI/bge-m3); HNSW index in raw SQL.
+/// ADR 0003 D6: NO verbatim caption text — embeddings + boundary flags only
+/// (text column dropped in prisma/migrations/slidegen-jobs-v2/002).
 model slide_caption_segments {
   id               String                       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   youtube_video_id String                       @db.VarChar(11)
   from_sec         Float
   to_sec           Float
-  text             String
   /// True when cosine distance to previous segment exceeds topic-change threshold.
   is_topic_change  Boolean                      @default(false)
   /// pgvector 1024-dim BGE-M3 embedding. Declared Unsupported; HNSW index in raw SQL.
@@ -157,19 +158,32 @@ model slide_caption_segments {
   @@schema("slidegen")
 }
 
-/// Async job tracker for the slidegen pipeline.
+/// Async job tracker for the slidegen pipeline (A-pipeline v2 stages, PR-G).
+/// Stage constants mirror src/types/job-stages.ts; CHECK constraints + partial
+/// failure_stage index live in prisma/migrations/slidegen-jobs-v2/001.
 model slide_jobs {
-  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  deck_id    String?  @db.Uuid
-  card_id    String?
-  video_id   String?  @db.VarChar(11)
-  /// "resolve" | "fetch_v2" | "cv_extract" | "plan" | "build_slides" | "export_pdf"
-  stage      String   @db.VarChar(20)
-  /// "queued" | "running" | "done" | "error"
-  status     String   @default("queued") @db.VarChar(20)
-  detail     Json?
-  created_at DateTime @default(now()) @db.Timestamptz(6)
-  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  deck_id       String?   @db.Uuid
+  card_id       String?
+  video_id      String?   @db.VarChar(11)
+  /// "acquire" | "keyframe" | "detect" | "select" | "numerize" | "build" | "validate"
+  /// (CHECK chk_slide_jobs_stage; 1:1 with ADR 0004 attribution families)
+  stage         String    @db.VarChar(20)
+  /// "queued" | "running" | "done" | "error" — timeout is expressed as
+  /// status='error' + last_error='timeout' + failure_stage (PR-G decision).
+  status        String    @default("queued") @db.VarChar(20)
+  detail        Json?
+  /// Self-correction attempts consumed (ADR 0004 G2 gate: attempts <= 2.0).
+  attempt_count Int       @default(0)
+  max_attempts  Int       @default(2)
+  /// Stage deadline stamped at stage start; running past it = timeout.
+  timeout_at    DateTime? @db.Timestamptz(6)
+  last_error    String?
+  /// Stage attributed on failure (ADR 0004 B-switch aggregation); same CHECK
+  /// domain as stage. Partial index idx_slide_jobs_failure_stage in raw SQL.
+  failure_stage String?   @db.VarChar(20)
+  created_at    DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
 
   deck slide_decks? @relation(fields: [deck_id], references: [id])
 
@@ -213,12 +227,15 @@ model youtube_videos {
 }
 
 /// Read-mirror of insighta.video_captions (subset).
+/// ACTUAL shape (insighta schema.prisma): video_id is a UUID FK →
+/// youtube_videos.id — NOT the 11-char YouTube id — and segments is a
+/// JSON-encoded TEXT column. Look up by YouTube id via a youtube_videos join.
 model video_captions {
-  id       String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  video_id String  @db.VarChar(11)
-  language String? @db.VarChar(10)
-  text     String?
-  segments Json?
+  id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  video_id String @db.Uuid
+  language String
+  text     String
+  segments String
 
   @@schema("public")
 }
