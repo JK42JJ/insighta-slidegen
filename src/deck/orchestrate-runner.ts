@@ -97,7 +97,18 @@ export interface ChartAsset {
 
 export interface RunnerResult extends OrchestrateOutcome {
   chartAssets: ChartAsset[];
+  /**
+   * orchestrate() calls that died on a BUILDER crash (template render on
+   * malformed LLM content) and were retried with a fresh conversation. The
+   * vendored loop feeds back JSON-parse failures but lets builder exceptions
+   * escape — and deck/ is byte-stable (ADR 0003 D7), so the retry lives
+   * HERE. Each crash consumed ≥1 LLM content attempt (counted as 1 for G2).
+   */
+  crashedAttempts: number;
 }
+
+/** Fresh-conversation retries after a builder crash (vendored-loop escape). */
+const BUILD_CRASH_RETRIES = 1;
 
 export interface RunnerOptions {
   /** Injected llm (REQUIRED in dev/test; prod may rely on OPENROUTER_API_KEY). */
@@ -200,16 +211,26 @@ export async function runOrchestrate(
     options.pythonBin
   );
 
-  // 3. vendored self-correction loop, llm explicitly injected.
+  // 3. vendored self-correction loop, llm explicitly injected. A builder
+  //    crash escapes the vendored loop (only JSON-parse failures feed back),
+  //    so it is retried here with a fresh conversation.
   const orchestrate = options.orchestrateImpl ?? loadVendoredOrchestrate();
-  const outcome = await orchestrate(resources, outPath, {
+  const orchestrateOpts = {
     llm,
     minSlides: options.minSlides ?? DEFAULT_MIN_SLIDES,
     ...(options.link !== undefined ? { link: options.link } : {}),
     ...(options.classify !== undefined ? { classify: options.classify } : {}),
-  });
-
-  return { ...outcome, chartAssets };
+  };
+  let crashedAttempts = 0;
+  for (;;) {
+    try {
+      const outcome = await orchestrate(resources, outPath, orchestrateOpts);
+      return { ...outcome, chartAssets, crashedAttempts };
+    } catch (err) {
+      crashedAttempts += 1;
+      if (crashedAttempts > BUILD_CRASH_RETRIES) throw err;
+    }
+  }
 }
 
 /** Absolute path of deck/scripts/orchestrate.js, found from the repo root. */

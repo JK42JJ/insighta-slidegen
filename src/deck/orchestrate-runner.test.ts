@@ -254,3 +254,48 @@ describe('chart-regen pre-step — failure = label-only fallback (ADR 0003 P2)',
     }
   });
 });
+
+describe('builder-crash retry (vendored-loop escape — PR-H2 live finding)', () => {
+  const RESOURCES = {
+    title: 't',
+    transcript: '',
+    segments: [],
+    figureLabels: [],
+    formulas: [],
+    charts: [],
+  };
+
+  it('retries ONE fresh conversation after a builder crash, reports crashedAttempts', async () => {
+    let calls = 0;
+    const orchestrateImpl = (async () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError('stats.slice is not a function');
+      return { ok: true, type: 'lecture', attempts: 2, out: '/tmp/deck.pptx' };
+    }) as unknown as Parameters<typeof runOrchestrate>[3]['orchestrateImpl'];
+
+    const result = await runOrchestrate(
+      RESOURCES,
+      '/tmp/slidegen-test-crash/deck.pptx',
+      { SLIDEGEN_MODE: 'dev' },
+      { llm: async () => '[]', orchestrateImpl }
+    );
+    expect(result.ok).toBe(true);
+    expect(result.crashedAttempts).toBe(1);
+    expect(calls).toBe(2);
+  });
+
+  it('rethrows after the retry budget is exhausted', async () => {
+    const orchestrateImpl = (async () => {
+      throw new TypeError('stats.slice is not a function');
+    }) as unknown as Parameters<typeof runOrchestrate>[3]['orchestrateImpl'];
+
+    await expect(
+      runOrchestrate(
+        RESOURCES,
+        '/tmp/slidegen-test-crash/deck.pptx',
+        { SLIDEGEN_MODE: 'dev' },
+        { llm: async () => '[]', orchestrateImpl }
+      )
+    ).rejects.toThrow('stats.slice');
+  });
+});

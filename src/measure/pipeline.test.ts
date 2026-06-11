@@ -88,6 +88,7 @@ function makeDeps(log: RepoLog, overrides: Partial<RealPipelineDeps> = {}): Real
       type: 'lecture',
       attempts: 1,
       out: 'deck.pptx',
+      crashedAttempts: 0,
       chartAssets: [],
     })) as unknown as typeof runOrchestrate,
     repo: stubRepo(log),
@@ -195,6 +196,7 @@ describe('buildRealPipeline', () => {
         type: 'lecture',
         attempts: 2,
         out: '',
+        crashedAttempts: 0,
         chartAssets: [],
       })) as unknown as typeof runOrchestrate,
     });

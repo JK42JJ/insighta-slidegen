@@ -220,27 +220,29 @@ export function buildRealPipeline(deps: RealPipelineDeps): PipelineFn {
     // 4. validate verdict — the orchestrate loop already ran validate_deck
     //    with FAIL-feedback retries; !ok = died in 'validate'.
     if (!built.ok) {
-      const message = `validate FAIL after ${built.attempts} attempts`;
+      // G2 honesty: crashed orchestrate calls consumed LLM attempts too.
+      const attempts = built.attempts + built.crashedAttempts;
+      const message = `validate FAIL after ${attempts} attempts`;
       await repo
-        .failJob(jobId, 'validate', message, prisma, { attemptCount: built.attempts })
+        .failJob(jobId, 'validate', message, prisma, { attemptCount: attempts })
         .catch(() => undefined);
       if (deckId) {
         await repo.setDeckStatus(deckId, 'error', message, prisma).catch(() => undefined);
       }
       return {
         validatePass: false,
-        attempts: built.attempts,
+        attempts,
         conf,
         failureStage: 'validate',
         error: message,
       };
     }
 
-    await repo.completeJob(jobId, built.attempts, prisma);
+    await repo.completeJob(jobId, built.attempts + built.crashedAttempts, prisma);
     await repo.setDeckStatus(deckId, 'done', null, prisma).catch(() => undefined);
     return {
       validatePass: true,
-      attempts: built.attempts,
+      attempts: built.attempts + built.crashedAttempts,
       conf,
       failureStage: null,
     };
