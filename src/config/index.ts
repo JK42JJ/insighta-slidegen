@@ -69,8 +69,10 @@ const envObjectSchema = z.object({
   SLIDEGEN_YOLO_BASE_URL: emptyAsUndefined(z.string().url().optional()),
   SLIDEGEN_YOLO_TOKEN: emptyAsUndefined(z.string().optional()),
   // S3 handoff (§4) — the backend is the ONLY presign issuer; model hosts
-  // receive presigned URLs, never credentials or the bucket name.
+  // receive presigned URLs, never credentials or the bucket name. AWS
+  // credentials ride the SDK default chain (AWS_ACCESS_KEY_ID/...).
   SLIDEGEN_S3_BUCKET: emptyAsUndefined(z.string().optional()),
+  SLIDEGEN_S3_REGION: emptyAsUndefined(z.string().optional()),
   SLIDEGEN_PRESIGN_EXPIRY_SEC: emptyAsUndefined(
     z.coerce.number().int().positive().default(DEFAULT_PRESIGN_EXPIRY_SEC)
   ),

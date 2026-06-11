@@ -46,6 +46,8 @@
     "url": "https://github.com/JK42JJ/insighta-slidegen/issues"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1066.0",
+    "@aws-sdk/s3-request-presigner": "^3.1066.0",
     "@prisma/client": "^5.7.1",
     "dotenv": "^16.3.1",
     "tslib": "^2.8.1",
