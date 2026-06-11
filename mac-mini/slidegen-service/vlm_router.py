@@ -31,6 +31,7 @@ backend output as plain dicts avoids a circular import with typing_select.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import mimetypes
 import os
@@ -264,6 +265,41 @@ def _image_data_url(path: Path) -> str:
     return f"data:{mime};base64,{encoded}"
 
 
+# ── Mode-A capacity guards (PR-H2 — measured live, 2026-06-11) ────────────────
+# A full v2-section window shipped EVERY candidate at source resolution in ONE
+# call: measured 27,605 input tokens against max-model-len 16,384 (HTTP 400)
+# and >120 s reads on the serving host. Routing only needs thumbnails, and
+# windows chunk fine because the JSON contract is per-frame in input order.
+# Tuning knobs, not secrets.
+ROUTING_IMAGE_MAX_DIM = 768
+ROUTING_IMAGE_JPEG_QUALITY = 80
+ROUTING_MAX_FRAMES_PER_CALL = 8
+
+
+def _routing_data_url(path: Path, max_dim: int = ROUTING_IMAGE_MAX_DIM) -> str:
+    """Downscaled data URL for ROUTING calls only (mode A select).
+
+    Selection is a routing decision, not numerization — thumbnails carry the
+    signal at a fraction of the vision-token cost. figure_extract keeps using
+    full-resolution crops via _image_data_url (numbers must stay readable).
+    Falls back to the full-resolution URL when the image cannot be decoded.
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(path) as img:
+            if max(img.size) <= max_dim:
+                return _image_data_url(path)
+            img = img.convert("RGB")
+            img.thumbnail((max_dim, max_dim))
+            buffer = io.BytesIO()
+            img.save(buffer, format="JPEG", quality=ROUTING_IMAGE_JPEG_QUALITY)
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{encoded}"
+    except Exception:  # noqa: BLE001 — decode failure → keep the original bytes
+        return _image_data_url(path)
+
+
 class HttpBackend:
     """vLLM OpenAI-compatible endpoint — contract call shape A (§2.2 mode A).
 
@@ -289,12 +325,20 @@ class HttpBackend:
         if not candidates:
             return []
         client = self._ensure_client()
-        image_urls = [_image_data_url(c.path) for c in candidates]
-        prompt = build_routing_prompt(len(candidates))
-        # Window section text travels as the mode-A companion text part
-        # (CONTRACT §2.2 mode A); selection grounding HINT only (ADR 0002 D5).
-        raw = client.select_and_classify(image_urls, prompt, captions_text=captions_text)
-        return [_normalize(r, c) for r, c in zip(raw, candidates)]
+        # Capacity guards (measured live): thumbnails + sub-window chunks so a
+        # big section window cannot blow max-model-len or the read timeout.
+        # The JSON contract is per-frame in input order, so chunk results
+        # concatenate 1:1 with the candidate order.
+        results: list[dict] = []
+        for start in range(0, len(candidates), ROUTING_MAX_FRAMES_PER_CALL):
+            chunk = candidates[start : start + ROUTING_MAX_FRAMES_PER_CALL]
+            image_urls = [_routing_data_url(c.path) for c in chunk]
+            prompt = build_routing_prompt(len(chunk))
+            # Window section text travels as the mode-A companion text part
+            # (CONTRACT §2.2 mode A); selection grounding HINT only (ADR 0002 D5).
+            raw = client.select_and_classify(image_urls, prompt, captions_text=captions_text)
+            results.extend(_normalize(r, c) for r, c in zip(raw, chunk))
+        return results
 
 
 _BACKENDS = {

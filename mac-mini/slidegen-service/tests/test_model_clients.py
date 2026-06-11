@@ -528,3 +528,19 @@ def test_http_backend_empty_input_no_calls():
 
     backend = HttpBackend()  # no client constructed — would raise if touched
     assert backend.route([]) == []
+
+
+def test_from_env_reads_timeout_knob():
+    """PR-H2: SLIDEGEN_VLM_TIMEOUT_SEC overrides the 120 s default read budget
+    (mode-A windows measured >120 s on the serving host)."""
+    from model_clients import DEFAULT_TIMEOUT_SEC, VlmHttpClient
+
+    env = _live_env(SLIDEGEN_MODE="prod", SLIDEGEN_VLM_TIMEOUT_SEC="300")
+    vlm = VlmHttpClient.from_env(env)
+    assert vlm._http.timeout.read == 300.0
+    vlm.close()
+
+    env_default = _live_env(SLIDEGEN_MODE="prod")
+    vlm_default = VlmHttpClient.from_env(env_default)
+    assert vlm_default._http.timeout.read == DEFAULT_TIMEOUT_SEC
+    vlm_default.close()

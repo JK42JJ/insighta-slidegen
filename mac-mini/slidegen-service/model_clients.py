@@ -45,6 +45,11 @@ ENV_VLM_TOKEN = "SLIDEGEN_VLM_TOKEN"
 ENV_VLM_MODEL = "SLIDEGEN_VLM_MODEL"
 ENV_YOLO_BASE_URL = "SLIDEGEN_YOLO_BASE_URL"
 ENV_YOLO_TOKEN = "SLIDEGEN_YOLO_TOKEN"
+# Per-call read budget override (seconds) — tuning knob, not a secret.
+# PR-H2 live measurement: mode-A windows on the serving host exceeded the
+# 120 s default (read timeout after 3 attempts) before window chunking; the
+# knob lets ops match the budget to the host without a code change.
+ENV_VLM_TIMEOUT_SEC = "SLIDEGEN_VLM_TIMEOUT_SEC"
 
 # Backend name that opts into live HTTP endpoints (§5); anything else = no live calls.
 HTTP_BACKEND_NAME = "http"
@@ -327,6 +332,8 @@ class VlmHttpClient:
         if not base_url:
             raise LiveConfigRefusedError(f"{ENV_VLM_BASE_URL} is not set")
         model = kwargs.pop("model", None) or env.get(ENV_VLM_MODEL) or DEFAULT_VLM_MODEL
+        if "timeout_sec" not in kwargs and env.get(ENV_VLM_TIMEOUT_SEC):
+            kwargs["timeout_sec"] = float(env[ENV_VLM_TIMEOUT_SEC])
         return cls(base_url, env.get(ENV_VLM_TOKEN, ""), model, **kwargs)
 
     def close(self) -> None:
