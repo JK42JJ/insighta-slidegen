@@ -67,24 +67,27 @@ Load on every session start (`/init`): `MEMORY.md`, `work-efficiency.md`,
   user approval ("ok" / "해" / "approved"). Proposal/question forms are not
   approval. Read-only commands (`ls`, `grep`, `git status`) need no plan.
 
-### 🔐 PR merge — explicit per-PR-number instruction only (amended 2026-06-10)
-- Claude Code may execute `gh pr merge <number>` **only when the repo owner
-  explicitly instructs a merge naming that PR number**. One instruction = that
-  one PR. Immediately after executing, **report the merge commit SHA**.
+### 🔐 PR merge — standing delegation to CC (amended 2026-06-11)
+- **Standing owner delegation** (2026-06-11): Claude Code merges its own PRs
+  **autonomously** when ALL of the following hold:
+  1. the PR was authored/driven by CC in-session (or explicitly handed to CC),
+  2. all required CI checks are green,
+  3. the `/verify` gate passed for the work,
+  4. immediately after each merge, **report the merge commit SHA** (audit).
+- **Colleague-authored PRs are NOT covered** — they still require the owner's
+  explicit nod (delegation covers CC's own pipeline, not other people's code).
 - Still **ABSOLUTELY banned**: the `--auto` flag, enabling GitHub auto-merge,
-  merges executed from background/watch/scheduled tasks, blanket instructions
-  ("merge everything", "merge once CI passes"), and any merge without a
-  specific PR number. A terse acknowledgment ("ci done", "ok next") is **NOT**
-  merge approval; a bare "merge" without a PR number → ask, don't act.
-- **Background / watch / scheduled tasks remain read-only**: no side effects
-  (merge, push, deploy, DDL) inside monitors, CI-watch loops, or cron jobs.
-  Watch → report → stop.
-- Other side effects (push to main, deploy, DDL apply) remain under
-  plan→approve→execute, unchanged.
-- (History: PR #15 — CC merged on an inferred go-ahead → absolute ban shipped
-  in PR #16 → the ban's wording also blocked the owner's explicit instruction,
-  which was stronger than its intent (preventing *unauthorized* merges) →
-  amended to this per-PR-number mechanism, standing per owner authorization.)
+  and merges executed from background/watch/scheduled tasks — those remain
+  **read-only** (watch → report → stop).
+- Mechanics: `approval-gate.sh` requires the `SLIDEGEN_USER_OK=1` marker on
+  merge commands; the standing delegation is the user approval it asks for —
+  the per-merge marker keeps each merge deliberate and auditable.
+- Other side effects (deploy, DDL apply) remain under plan→approve→execute.
+- (History: PR #15 — CC merged on an inferred go-ahead → absolute ban (PR #16)
+  → per-PR-number mechanism (2026-06-10) → standing delegation once CC was
+  both implementing and verifying and per-number round-trips became the
+  bottleneck (owner, 2026-06-11). CI + /verify + SHA audit + the colleague-PR
+  carve-out contain the risk.)
 
 ### 🧱 DB work order — local-first + raw SQL DDL (NO `prisma db push`)
 - **Local → production order. No exceptions.**
