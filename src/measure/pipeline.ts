@@ -77,6 +77,12 @@ export interface RealPipelineDeps {
   cvArtifactsRoot?: string;
   cvTimeoutMs?: number;
   /**
+   * §4 existence experiment: skip the CV leg entirely and build from the v2
+   * summary text alone (no figures). Produces the "LLM-only" arm to compare
+   * against the figure-placing pipeline. Default false = full pipeline.
+   */
+  noCv?: boolean;
+  /**
    * Config slice (mode + OpenRouter key). When absent, resolved from
    * src/config LAZILY at first run — keeps this module loadable in tests
    * without a full env (the config singleton parses process.env at import).
@@ -159,47 +165,68 @@ export function buildRealPipeline(deps: RealPipelineDeps): PipelineFn {
 
     const jobId = await repo.createJob({ videoId: entry.videoId }, prisma);
 
+    // §4 LLM-only arm: skip CV entirely, build from v2 text with no figures.
+    // The empty bundle (no charts/formulas) → no figureAssets → 0 figures
+    // placed, isolating "what does the CV leg add?" against the full pipeline.
+    const EMPTY_CV: Awaited<ReturnType<typeof extractFigures>> = {
+      job_id: 'no-cv',
+      figures: [],
+      keyframe_count: 0,
+      resources: {
+        title: summary.core.one_liner,
+        transcript: '',
+        segments: summary.segments?.sections ?? [],
+        figureLabels: [],
+        formulas: [],
+        charts: [],
+      },
+    };
+
     // 2. CV extraction (service runs acquire → … → numerize remotely).
     let cvResult: Awaited<ReturnType<typeof extractFigures>>;
-    try {
-      await repo.enterJobStage(jobId, 'acquire', prisma, {
-        timeoutAt: new Date(Date.now() + cvTimeoutMs),
-      });
-      const cvSections = (summary.segments?.sections ?? []).map((s, i) => ({
-        index: i,
-        from_sec: s.from_sec,
-        to_sec: s.to_sec,
-        title: s.title,
-        summary: s.summary ?? undefined,
-      }));
-      cvResult = await extractFiguresImpl(
-        {
-          youtube_video_id: entry.videoId,
-          sections: cvSections,
-          mode: appConfig.SLIDEGEN_MODE,
-          title: summary.core.one_liner,
-          // Observability: the SERVICE writes the per-stage tree (its own
-          // filesystem) keyed by the anonymous index — never the video id.
-          ...(deps.cvArtifactsRoot
-            ? {
-                artifacts_dir: `${deps.cvArtifactsRoot}/${entry.index}`,
-                artifact_index: entry.index,
-              }
-            : {}),
-        },
-        { timeoutMs: cvTimeoutMs }
-      );
-    } catch (err) {
-      const stage = err instanceof CvExtractionError ? err.stage : null;
-      const message = sanitize(errText(err));
-      // DB CHECK needs a concrete stage; 'acquire' is the entry stage of the
-      // CV leg. The REPORT keeps the honest null (manual attribution).
-      await repo.failJob(jobId, stage ?? 'acquire', message, prisma).catch(() => undefined);
-      if (stage === 'acquire' && isInputUnsuitable(message)) {
-        throw new Error(`${INPUT_UNSUITABLE_PREFIX}${message}`);
+    if (deps.noCv) {
+      cvResult = EMPTY_CV;
+    } else {
+      try {
+        await repo.enterJobStage(jobId, 'acquire', prisma, {
+          timeoutAt: new Date(Date.now() + cvTimeoutMs),
+        });
+        const cvSections = (summary.segments?.sections ?? []).map((s, i) => ({
+          index: i,
+          from_sec: s.from_sec,
+          to_sec: s.to_sec,
+          title: s.title,
+          summary: s.summary ?? undefined,
+        }));
+        cvResult = await extractFiguresImpl(
+          {
+            youtube_video_id: entry.videoId,
+            sections: cvSections,
+            mode: appConfig.SLIDEGEN_MODE,
+            title: summary.core.one_liner,
+            // Observability: the SERVICE writes the per-stage tree (its own
+            // filesystem) keyed by the anonymous index — never the video id.
+            ...(deps.cvArtifactsRoot
+              ? {
+                  artifacts_dir: `${deps.cvArtifactsRoot}/${entry.index}`,
+                  artifact_index: entry.index,
+                }
+              : {}),
+          },
+          { timeoutMs: cvTimeoutMs }
+        );
+      } catch (err) {
+        const stage = err instanceof CvExtractionError ? err.stage : null;
+        const message = sanitize(errText(err));
+        // DB CHECK needs a concrete stage; 'acquire' is the entry stage of the
+        // CV leg. The REPORT keeps the honest null (manual attribution).
+        await repo.failJob(jobId, stage ?? 'acquire', message, prisma).catch(() => undefined);
+        if (stage === 'acquire' && isInputUnsuitable(message)) {
+          throw new Error(`${INPUT_UNSUITABLE_PREFIX}${message}`);
+        }
+        if (stage) throw new StageFailureError(stage, message);
+        throw new Error(message);
       }
-      if (stage) throw new StageFailureError(stage, message);
-      throw new Error(message);
     }
 
     const conf = confDistribution(cvResult.figures);

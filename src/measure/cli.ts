@@ -36,6 +36,7 @@ async function main(): Promise<void> {
       out: { type: 'string', default: DEFAULT_REPORT_PATH },
       artifacts: { type: 'string' },
       'cv-artifacts': { type: 'string' },
+      'no-cv': { type: 'boolean', default: false },
       'cv-timeout-sec': { type: 'string' },
     },
   });
@@ -59,6 +60,7 @@ async function main(): Promise<void> {
       cvTimeoutMs,
       // Service-side per-stage artifact tree (Mac Mini path). Review pull is ops.
       ...(values['cv-artifacts'] ? { cvArtifactsRoot: values['cv-artifacts'] } : {}),
+      ...(values['no-cv'] ? { noCv: true } : {}),
     });
     const measurements = await runMeasurement(samples, async (entry) => {
       // Index only — the videoId never reaches stdout (pipeline errors are

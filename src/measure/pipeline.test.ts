@@ -210,3 +210,35 @@ describe('buildRealPipeline', () => {
     expect(log.failures[0]!.stage).toBe('validate');
   });
 });
+
+describe('noCv arm (§4 existence experiment)', () => {
+  it('skips CV and builds from v2 text with an empty figure bundle', async () => {
+    const log = freshLog();
+    let extractCalled = false;
+    const deps = makeDeps(log, {
+      noCv: true,
+      extractFiguresImpl: (async () => {
+        extractCalled = true;
+        return CV_RESULT;
+      }) as unknown as typeof extractFigures,
+      runOrchestrateImpl: (async (resources: unknown) => {
+        // the bundle reaching orchestrate must carry NO figures
+        const r = resources as { charts: unknown[]; formulas: unknown[] };
+        expect(r.charts).toEqual([]);
+        expect(r.formulas).toEqual([]);
+        return {
+          ok: true,
+          type: 'lecture',
+          attempts: 1,
+          out: 'deck.pptx',
+          crashedAttempts: 0,
+          chartAssets: [],
+        };
+      }) as unknown as typeof runOrchestrate,
+    });
+    const result = await buildRealPipeline(deps)(ENTRY);
+    expect(extractCalled).toBe(false); // CV leg skipped entirely
+    expect(result.validatePass).toBe(true);
+    expect(result.conf).toEqual({ belowThreshold: 0, total: 0 });
+  });
+});
