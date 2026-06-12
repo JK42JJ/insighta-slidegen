@@ -121,13 +121,16 @@ jobs:
       - name: Pre-install CPU-only torch
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
+      - name: Install Graphviz (dot binary for diagram_regen — roadmap 2)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq graphviz
+
       - name: Install py/ deps
         # requirements.txt may not exist yet; tolerate missing file gracefully.
         run: |
           if [ -f py/requirements.txt ]; then
             pip install -r py/requirements.txt
           fi
-          pip install ruff pytest
+          pip install ruff pytest matplotlib graphviz pillow
 
       - name: Install mac-mini/slidegen-service deps
         run: |

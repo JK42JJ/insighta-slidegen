@@ -109,6 +109,22 @@ def _chart_struct_consistent(struct: dict | None) -> tuple[bool, str]:
         return False, f"insight='{insight[:30]}'(flat) but series varies {ys[:6]}"
     return True, ""
 
+
+def _diagram_struct_consistent(struct: dict | None) -> tuple[bool, str]:
+    """diagram node↔edge sanity (roadmap 2 §5): every edge endpoint must be a
+    declared node id. A phantom-node edge is a numerize hallucination → reject.
+    Non-diagram structs pass through untouched."""
+    if not isinstance(struct, dict) or "diagram_type" not in struct:
+        return True, ""
+    nodes = struct.get("nodes") or []
+    ids = {str(n.get("id")) for n in nodes if isinstance(n, dict) and n.get("id") is not None}
+    if not ids:
+        return False, "diagram has no nodes"
+    for e in struct.get("edges") or []:
+        if not isinstance(e, dict) or str(e.get("from")) not in ids or str(e.get("to")) not in ids:
+            return False, f"edge references undeclared node: {e}"
+    return True, ""
+
 # ── Mode B/C prompt contents (PR-F scope per CONTRACT §7; wire shape is §2.2) ─
 CROP_CLASSIFY_PROMPT = (
     "You classify ONE cropped region from a knowledge-video frame. The "
@@ -120,7 +136,16 @@ CROP_CLASSIFY_PROMPT = (
     '"axes": {"x": "", "y": ""}, '
     '"series": [{"name": "", "points": [{"x": 0, "y": 0}]}], '
     '"insight": "one sentence"}; for kind=table: {"headers": [], "rows": [[]]}; '
+    'for kind=diagram: {"diagram_type": "flow"|"tree"|"layered"|"matrix"|"swimlane", '
+    '"nodes": [{"id": "n1", "label": "short text", "group": "optional lane/layer"}], '
+    '"edges": [{"from": "n1", "to": "n2", "style": "solid"|"dashed"}], '
+    '"insight": "one sentence"}; '
     'otherwise {}>, "confidence": <float 0..1>}. '
+    "For kind=diagram: capture the boxes as nodes and the arrows as edges — "
+    "every edge's from/to MUST reference a declared node id; pick the "
+    "diagram_type that matches the layout (left→right steps=flow, hierarchy=tree, "
+    "stacked bands=layered, grid mapping=matrix, actor lanes=swimlane). Do NOT "
+    "invent nodes/edges that are not visibly drawn. "
     "REJECT RULES — return the reject kind with EMPTY struct, do NOT invent a "
     "chart: hand-drawn sketches/handwriting on a board → \"handwriting\"; a "
     "slide/section TITLE or heading text → \"title\"; a logo, icon, or "
@@ -302,10 +327,12 @@ def extract_figures(
                 _drop(f"low confidence {conf}")
                 continue
 
-            # GATE #5 — insight↔series consistency (chart structs only): the
-            # numerize-hallucination check (triangle data under a 'uniform'
-            # insight). Inconsistent → label-only, never a garbage struct.
+            # GATE #5 — struct consistency: chart insight↔series (the triangle
+            # hallucination), and diagram node↔edge (an edge referencing a
+            # phantom node). Inconsistent → label-only, never a garbage struct.
             ok, why = _chart_struct_consistent(struct)
+            if ok:
+                ok, why = _diagram_struct_consistent(struct)
             if not ok:
                 _drop(f"struct inconsistent: {why}")
                 continue

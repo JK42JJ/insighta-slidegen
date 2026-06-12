@@ -274,9 +274,11 @@ export function regenCharts(
   formulas: FormulaResource[] = []
 ): ChartAsset[] {
   const py = path.join(findRepoRoot(), 'py');
-  const run = (job: object, outPng: string): string | null => {
+  // module: chart_regen (matplotlib data charts + equations) OR diagram_regen
+  // (Graphviz structure: diagram/table — roadmap 2). Routed by kind.
+  const run = (module: string, job: object, outPng: string): string | null => {
     try {
-      const stdout = execFileSync(pythonBin, ['-m', 'deck_tools.chart_regen'], {
+      const stdout = execFileSync(pythonBin, ['-m', module], {
         cwd: py,
         input: JSON.stringify({ ...job, out: outPng }),
         encoding: 'utf8',
@@ -286,16 +288,25 @@ export function regenCharts(
       return null;
     }
   };
-  const chartAssets = charts.map((chart, index) => ({
-    figureId: chart.figure_id ?? null,
-    snapshot: chart.snapshot ?? null,
-    pngPath: run({ struct: chart.struct }, path.join(artifactsDir, `chart_${index}.png`)),
-  }));
+  // Data charts (line/bar/scatter) → chart_regen; diagram/table → diagram_regen.
+  // Either failing returns null → label-only (never a raw frame, ADR 0003 P2).
+  const STRUCTURE_KINDS = new Set(['diagram', 'table']);
+  const chartAssets = charts.map((chart, index) => {
+    const out = path.join(artifactsDir, `chart_${index}.png`);
+    const pngPath = STRUCTURE_KINDS.has(chart.kind)
+      ? run('deck_tools.diagram_regen', { struct: chart.struct }, out)
+      : run('deck_tools.chart_regen', { struct: chart.struct }, out);
+    return { figureId: chart.figure_id ?? null, snapshot: chart.snapshot ?? null, pngPath };
+  });
   // §1b: equations render too (mode C → mathtext PNG), same figure_id keying.
   const formulaAssets = formulas.map((formula, index) => ({
     figureId: formula.figure_id ?? null,
     snapshot: formula.snapshot ?? null,
-    pngPath: run({ kind: 'equation', latex: formula.latex }, path.join(artifactsDir, `eq_${index}.png`)),
+    pngPath: run(
+      'deck_tools.chart_regen',
+      { kind: 'equation', latex: formula.latex },
+      path.join(artifactsDir, `eq_${index}.png`)
+    ),
   }));
   return [...chartAssets, ...formulaAssets];
 }
