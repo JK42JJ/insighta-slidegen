@@ -60,6 +60,16 @@ SUPPORTED_CHART_TYPES = ("line", "bar", "scatter")
 # Grouped-bar layout: total fraction of each category slot occupied by bars.
 BAR_GROUP_WIDTH = 0.72
 
+# §2b (academic-report-builder dense-recipe 5): a single-series bar chart whose
+# largest value dwarfs the smallest by this factor gets a broken-axis 2-panel
+# treatment so the small bars stay visible. Tuning knob, not a secret.
+BROKEN_AXIS_RATIO = 12.0
+# §2e / invariant 11 self-check: a regenerated PNG carrying almost no ink is a
+# rendering failure (blank/near-blank) — reject it so the caller falls back to
+# label-only rather than embedding an empty figure. Fraction of non-background
+# pixels below which the render is considered empty.
+MIN_INK_FRACTION = 0.002
+
 
 def _ax(figsize: tuple[float, float] = DEFAULT_FIGSIZE):
     """Transparent-background axes with brand spines/ticks (figures.py `_ax`)."""
@@ -89,6 +99,10 @@ def regenerate_chart(struct: dict, out_path: str | os.PathLike) -> str | None:
     if not series:
         return None
 
+    # §2b: extreme single-series bar spread → broken-axis 2-panel render.
+    if chart_type == "bar" and _needs_broken_axis(series):
+        return _regenerate_bar_broken(struct, series, out_path)
+
     fig, ax = _ax()
     try:
         if chart_type == "bar":
@@ -114,6 +128,15 @@ def regenerate_chart(struct: dict, out_path: str | os.PathLike) -> str | None:
         fig.savefig(out_path, transparent=True, bbox_inches="tight", dpi=FIGURE_DPI)
     finally:
         plt.close(fig)
+
+    # §2e / invariant 11 — quality floor: a near-empty render is a failure.
+    # Reject it so the caller degrades to label-only (never an empty figure).
+    if not _has_enough_ink(out_path):
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        return None
     return str(out_path)
 
 
@@ -121,16 +144,147 @@ def _color(index: int) -> str:
     return SERIES_COLORS[index % len(SERIES_COLORS)]
 
 
+def _value_label(value: float) -> str:
+    """§2c quality floor: bars carry their numeric value, not a bare shape."""
+    if value == int(value):
+        return str(int(value))
+    return f"{value:.4g}"
+
+
 def _draw_bar(ax, series: list[tuple[str, list, list]]) -> None:
-    """Grouped bars; category labels come from each series' x values."""
+    """Grouped bars; category labels come from each series' x values.
+
+    §2c: every bar is annotated with its value (a labelled-only bar is
+    'unfinished' per invariant 11). Single-series charts with an extreme
+    value spread get a broken-axis panel via _draw_bar_broken instead.
+    """
     labels = [str(x) for x in series[0][1]]
     positions = range(len(labels))
     bar_width = BAR_GROUP_WIDTH / len(series)
     for i, (name, _xs, ys) in enumerate(series):
         offsets = [p + (i - (len(series) - 1) / 2) * bar_width for p in positions]
-        ax.bar(offsets, ys[: len(labels)], width=bar_width, color=_color(i), zorder=3, label=name)
+        heights = ys[: len(labels)]
+        bars = ax.bar(offsets, heights, width=bar_width, color=_color(i), zorder=3, label=name)
+        ax.bar_label(
+            bars, labels=[_value_label(v) for v in heights], padding=2, fontsize=8, color=MUT
+        )
     ax.set_xticks(list(positions))
     ax.set_xticklabels(labels)
+
+
+def _needs_broken_axis(series: list[tuple[str, list, list]]) -> bool:
+    """Single-series bar with an extreme max/min spread (§2b trigger)."""
+    if len(series) != 1:
+        return False
+    ys = [v for v in series[0][2] if v > 0]
+    if len(ys) < 2:
+        return False
+    return max(ys) / min(ys) >= BROKEN_AXIS_RATIO
+
+
+def _regenerate_bar_broken(
+    struct: dict, series: list[tuple[str, list, list]], out_path: str | os.PathLike
+) -> str | None:
+    """Broken-axis 2-panel bar (§2b / dense-recipe 5): top = full range, bottom
+    = zoomed to the small values, so an extreme spread keeps every bar visible.
+    Bars are matplotlib `Rectangle`s via ax.bar (NO FancyBboxPatch rounding —
+    rounding is read in data coords and crushes narrow bars; v3 failure mode)."""
+    name, xs, ys = series[0]
+    labels = [str(x) for x in xs]
+    heights = ys[: len(labels)]
+    positions = list(range(len(labels)))
+    small_max = sorted(v for v in heights if v > 0)[len(heights) // 2] * 2  # ~median band
+
+    fig, (ax_top, ax_bot) = plt.subplots(
+        2, 1, figsize=(DEFAULT_FIGSIZE[0], DEFAULT_FIGSIZE[1] * 1.25), dpi=FIGURE_DPI, sharex=True
+    )
+    for axp in (ax_top, ax_bot):
+        axp.patch.set_alpha(0)
+        for spine in ("top", "right"):
+            axp.spines[spine].set_visible(False)
+        axp.spines["left"].set_color(LINE)
+        axp.spines["bottom"].set_color(LINE)
+        axp.tick_params(colors=MUT, labelsize=9)
+    fig.patch.set_alpha(0)
+    try:
+        for axp in (ax_top, ax_bot):
+            bars = axp.bar(positions, heights, width=BAR_GROUP_WIDTH, color=_color(0), zorder=3)
+            axp.bar_label(
+                bars, labels=[_value_label(v) for v in heights], padding=2, fontsize=8, color=MUT
+            )
+        ax_top.set_ylim(0, max(heights) * 1.12)  # full range
+        ax_bot.set_ylim(0, small_max)  # zoomed band
+        ax_top.spines["bottom"].set_visible(False)
+        ax_top.tick_params(bottom=False)
+        ax_bot.set_xticks(positions)
+        ax_bot.set_xticklabels(labels)
+        axes = struct.get("axes") or {}
+        if axes.get("y"):
+            ax_bot.set_ylabel(str(axes["y"]), fontsize=10, color=INK)
+        if axes.get("x"):
+            ax_bot.set_xlabel(str(axes["x"]), fontsize=10, color=INK)
+        if struct.get("insight"):
+            ax_top.set_title(str(struct["insight"]), fontsize=10.5, color=INK, pad=8)
+        plt.tight_layout(pad=0.4)
+        fig.savefig(out_path, transparent=True, bbox_inches="tight", dpi=FIGURE_DPI)
+    finally:
+        plt.close(fig)
+    if not _has_enough_ink(out_path):
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        return None
+    return str(out_path)
+
+
+def regenerate_equation(latex: str, out_path: str | os.PathLike) -> str | None:
+    """§2d: render an OCR'd LaTeX string to a brand PNG via matplotlib mathtext.
+
+    Pure-text rendering (no pdflatex dependency) — covers the common
+    inline/display math the equation OCR emits. Returns None when the string
+    is empty or mathtext cannot parse it (caller falls back to label-only;
+    low-confidence equations are flagged upstream, never silently embedded —
+    ADR 0003 D3)."""
+    if not isinstance(latex, str) or not latex.strip():
+        return None
+    body = latex.strip().strip("$")
+    fig = plt.figure(figsize=(6.0, 1.6), dpi=FIGURE_DPI)
+    fig.patch.set_alpha(0)
+    try:
+        fig.text(0.5, 0.5, f"${body}$", fontsize=24, color=INK, ha="center", va="center")
+        fig.savefig(out_path, transparent=True, bbox_inches="tight", dpi=FIGURE_DPI)
+    except (ValueError, RuntimeError):
+        # mathtext parse failure → label-only fallback.
+        plt.close(fig)
+        return None
+    finally:
+        plt.close(fig)
+    if not _has_enough_ink(out_path):
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        return None
+    return str(out_path)
+
+
+def _has_enough_ink(out_path: str | os.PathLike) -> bool:
+    """§2e self-check: True if the PNG has more than MIN_INK_FRACTION
+    non-transparent pixels. Guards against blank/near-blank renders."""
+    try:
+        from PIL import Image
+
+        with Image.open(out_path) as img:
+            alpha = img.convert("RGBA").getchannel("A")
+            hist = alpha.histogram()
+            total = sum(hist)
+            if total == 0:
+                return False
+            opaque = sum(hist[16:])  # alpha > ~6% counts as ink
+            return opaque / total >= MIN_INK_FRACTION
+    except Exception:  # noqa: BLE001 — a check failure must not block rendering
+        return True
 
 
 def _normalize_series(raw: Any) -> list[tuple[str, list, list]]:
@@ -165,16 +319,21 @@ def _normalize_series(raw: Any) -> list[tuple[str, list, list]]:
 def main() -> int:
     """CLI entry for the node deck runner pre-step (PR-F3).
 
-    Reads ONE JSON job from stdin: {"struct": <mode-B struct>, "out": "<png path>"}.
-    Writes {"png": "<written path>"} on success, or {"png": null} when the
-    struct is not regenerable — the caller then falls back to label-only,
-    NEVER to a raw frame (ADR 0003 P2).
+    Reads ONE JSON job from stdin. Two job kinds:
+      chart:    {"struct": <mode-B struct>, "out": "<png>"}
+      equation: {"kind": "equation", "latex": "<latex>", "out": "<png>"}
+    Writes {"png": "<written path>"} on success, or {"png": null} when not
+    regenerable — the caller then falls back to label-only, NEVER to a raw
+    frame (ADR 0003 P2).
     """
     import json
     import sys
 
     job = json.load(sys.stdin)
-    png = regenerate_chart(job.get("struct"), job["out"])
+    if job.get("kind") == "equation":
+        png = regenerate_equation(job.get("latex") or "", job["out"])
+    else:
+        png = regenerate_chart(job.get("struct"), job["out"])
     json.dump({"png": png}, sys.stdout)
     return 0
 

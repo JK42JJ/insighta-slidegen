@@ -77,6 +77,10 @@ def assemble_resources(
         if figure.kind == EQUATION_KIND and figure.extracted_latex is not None:
             formulas.append(
                 {
+                    # figure_id is the stable key the deck builder uses to look
+                    # up the regenerated asset (PR-A figureRef contract). 1:1
+                    # with redraw output filenames; never a pixel path here.
+                    "figure_id": figure.cv_figure_id,
                     "snapshot": snapshot,
                     "latex": figure.extracted_latex,
                     "conf": figure.extraction_conf,
@@ -87,6 +91,7 @@ def assemble_resources(
         elif figure.struct:
             charts.append(
                 {
+                    "figure_id": figure.cv_figure_id,
                     "snapshot": snapshot,
                     "kind": figure.kind,
                     "struct": figure.struct,
