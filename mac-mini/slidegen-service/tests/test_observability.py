@@ -75,12 +75,37 @@ def test_sink_is_noop_without_dir(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_sink_never_writes_real_video_id(tmp_path):
-    """PUBLIC-repo rule: only the anonymous index, never the real id."""
+def test_sink_strips_video_id_from_frame_and_crop_paths(tmp_path):
+    """PUBLIC-repo rule: frame/crop paths live under
+    /tmp/slidegen-frames/<youtube_id>/… — only the leaf filename may be
+    written, never the id-bearing directory (regression: the V02 sample run
+    surfaced the full path leaking into the stage JSON)."""
+    yt_id = "sSjeDITAyYx"  # synthetic 11-char id (fixture only)
+
+    class _Frame:
+        def __init__(self, p):
+            self.path = p
+            self.timestamp_sec = 10.0
+
+    class _Sel:
+        candidate = _Frame(f"/tmp/slidegen-frames/{yt_id}/0_0.jpg")
+        frame_type = "chart"
+        selection_score = 0.9
+        is_topic_aligned = True
+        summary_hint = "h"
+        contains_graph = True
+        contains_equation = False
+
+    fig = _Fig("f1", "chart", bbox={"x": 0, "y": 0, "w": 5, "h": 5},
+               struct={"chart_type": "line", "series": []})
+    fig.png_path = f"/tmp/slidegen-frames/{yt_id}/crops/c0.png"
+
     sink = StageArtifactSink(tmp_path, "V02")
-    sink.keyframes(5, [_selected(3)])
+    sink.keyframes(5, [_Sel()])
+    sink.detect_and_numerize([fig])
     sink.write_manifest()
+
     blob = "".join(p.read_text() for p in tmp_path.rglob("*") if p.is_file())
+    assert yt_id not in blob  # the id-bearing dir must never appear
+    assert "0_0.jpg" in blob and "c0.png" in blob  # leaf names are fine
     assert "V02" in blob
-    # frame paths use the synthetic /tmp/f_*.jpg fixture — no 11-char yt id.
-    assert "youtube.com" not in blob

@@ -51,6 +51,12 @@ class StageArtifactSink:
         if self.root is not None:
             self.root.mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def _safe_path(p: Any) -> str:
+        """Frame/crop paths live under /tmp/slidegen-frames/<youtube_id>/… —
+        the id segment is a PUBLIC-repo leak. Keep only the leaf filename."""
+        return os.path.basename(str(p)) if p else ""
+
     def _write(self, stage_dir: str, name: str, payload: Any) -> None:
         if self.root is None:
             return
@@ -76,7 +82,7 @@ class StageArtifactSink:
                         "summary_hint": s.summary_hint,
                         "contains_graph": s.contains_graph,
                         "contains_equation": s.contains_equation,
-                        "frame_path": str(s.candidate.path),
+                        "frame_path": self._safe_path(s.candidate.path),
                     }
                     for s in selected
                 ],
@@ -96,7 +102,7 @@ class StageArtifactSink:
             "boxes.json",
             [
                 {"figure_id": f.cv_figure_id, "kind": f.kind, "bbox": f.bbox,
-                 "timestamp_sec": f.timestamp_sec, "crop_path": f.png_path}
+                 "timestamp_sec": f.timestamp_sec, "crop_path": self._safe_path(f.png_path)}
                 for f in figures
             ],
         )

@@ -50,8 +50,15 @@ const orchestrateOpts = { llm, minSlides, link?, classify?,
 
 ### 1c. vendored 레시피가 figure를 소비한다 (단절 ② 봉합 — **upstream 개정 + 재vendor**)
 
-deck/는 byte-stable(ADR 0003 D7)이라 **upstream `insighta-visual-deck`를 먼저
-고치고 재vendor**한다. 세 곳:
+> **⚠️ D7 예외 (이 PR 한정, James 승인 2026-06-12)**: upstream
+> `insighta-visual-deck` 레포가 로컬·GitHub 어디에도 실재하지 않음을 확인했다
+> (`gh repo list` + 로컬 find 음성). 정석 "upstream 개정 → 재vendor"가 불가하여,
+> **이 PR에 한해 vendored `deck/scripts/*.js`를 직접 편집**한다(ADR 0003 D7
+> 바이트 불가침의 1회성 예외). deck/엔 해시락·바이트검증 가드가 없어 기술적
+> 차단은 없으나, 예외를 영구화하지 않는다 — **후속 PR 목록에 "D7 정리:
+> deck/를 정식 first-party로 편입하거나 upstream 레포 신설"을 등재**(아래 §5).
+
+deck/를 직접 편집한다(상기 예외). 세 곳:
 
 1. **content 스키마 확장** — 섹션/콘텐츠 블록에 선택적 `figureRef` 키:
    ```
@@ -182,7 +189,14 @@ figure_id를 붙일지 선택 + 캡션 작성만.
 5. validate figure 게이트 (1d)
 6. 비교 실험 (4절) → James 판정
 
-**보류 유지**: 측정 전 머지 금지(worktree-prh2-proxy 9be1f54) · 키 로테이션
-(VLLM/YOLO/Webshare/포드 SSH) · 후속 PR 누적 목록(DB 직접접근 백엔드 경유 /
-presigned §4 통일 / slide_figures·slide_keyframes raw-DDL 드리프트 / acquire
-에러 redaction / GH Secret VLM URL 교정).
+**보류 유지**: 측정 전 머지 금지(worktree-prh2-proxy) · 키 로테이션
+(VLLM/YOLO/Webshare/포드 SSH) · 후속 PR 누적 목록:
+- DB 직접접근(captions/keyframes) 백엔드 경유 전환
+- 모델 핸드오프 presigned §4 통일 (현 data URL)
+- slide_figures·slide_keyframes raw-DDL 드리프트 해소
+- acquire 에러 메시지 redaction (프록시 자격 노출)
+- GH Secret `SLIDEGEN_VLM_BASE_URL` 값 교정 (`/v1` 제거)
+- **D7 정리: deck/를 정식 first-party로 편입하거나 upstream 레포 신설**
+  (이 PR의 D7 1회성 예외를 영구화하지 않기 위함 — James 조건)
+- CV 서비스 단계 트리의 로컬 pull 자동화 (현 ops scp)
+- diagram struct 추출 → Graphviz figlib/figdense 배치 (PR-A에서 label-only로 연기)
