@@ -86,7 +86,7 @@ def make_yolo_stub(boxes: list[dict]) -> YoloStub:
     return YoloStub(image_w=FRAME_W, image_h=FRAME_H, boxes=boxes)
 
 
-def run_extract(frames, yolo_stub, vlm_stub, tmp_path):
+def run_extract(frames, yolo_stub, vlm_stub, tmp_path, self_consistency=False):
     from figure_extract import extract_figures
 
     return extract_figures(
@@ -94,6 +94,7 @@ def run_extract(frames, yolo_stub, vlm_stub, tmp_path):
         yolo=make_yolo_client(yolo_stub),
         vlm=make_vlm_client(vlm_stub),
         out_dir=tmp_path / "crops",
+        self_consistency=self_consistency,
     )
 
 
@@ -171,7 +172,7 @@ def test_low_confidence_is_flagged_unverified(tmp_path):
 
     yolo = make_yolo_stub([{"bbox": {"x": 0, "y": 0, "w": 60, "h": 60}, "class": "figure", "score": 0.9}])
     vlm = VlmStub()
-    vlm.script_content('{"kind": "chart", "struct": {"chart_type": "bar"}, "confidence": 0.5}')
+    vlm.script_content('{"kind": "chart", "struct": {"chart_type": "bar"}, "confidence": 0.6}')
 
     figures = run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path)
     assert figures[0].verification_status == "unverified"
@@ -184,7 +185,7 @@ def test_low_confidence_equation_is_flagged(tmp_path):
     vlm = VlmStub()
     vlm.script_content(
         '{"kind": "equation", "struct": {}, "confidence": 0.9}',
-        '{"latex": "\\\\sum_i x_i", "confidence": 0.3}',
+        '{"latex": "\\\\sum_i x_i", "confidence": 0.6}',
     )
 
     figures = run_extract([make_frame(tmp_path, contains_equation=True)], yolo, vlm, tmp_path)
@@ -357,3 +358,70 @@ def test_text_and_photo_crops_are_dropped_not_shipped(tmp_path):
     figures = run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path)
 
     assert [f.kind for f in figures] == ["chart"]
+
+
+# ── Selection gate (fail-closed) — PR review root-cause fix ───────────────────
+
+
+def test_gate_rejects_handwriting_class(tmp_path):
+    """Qwen's own veto: a reject kind → dropped (no struct pollution)."""
+    yolo = make_yolo_stub([{"bbox": {"x": 0, "y": 0, "w": 60, "h": 60}, "class": "figure", "score": 0.9}])
+    vlm = VlmStub()
+    vlm.script_content('{"kind": "handwriting", "struct": {}, "confidence": 0.9}')
+    assert run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path) == []
+
+
+def test_gate_low_confidence_below_floor_is_rejected(tmp_path):
+    """저신뢰=탈락: conf below GATE_CONF_FLOOR (0.55) drops the crop entirely
+    (distinct from the 0.55-0.7 unverified-flag band)."""
+    from figure_extract import GATE_CONF_FLOOR
+
+    assert GATE_CONF_FLOOR == 0.55
+    yolo = make_yolo_stub([{"bbox": {"x": 0, "y": 0, "w": 60, "h": 60}, "class": "figure", "score": 0.9}])
+    vlm = VlmStub()
+    vlm.script_content('{"kind": "chart", "struct": {"chart_type": "bar"}, "confidence": 0.4}')
+    assert run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path) == []
+
+
+def test_gate_oversize_bbox_rejected(tmp_path):
+    """Whole-board over-detection (bbox > 85% of frame) → rejected pre-numerize
+    (the formula[3] failure: entire blackboard as one box)."""
+    # FRAME_W×FRAME_H box ≈ full frame → over MAX_CROP_AREA_FRAC.
+    yolo = make_yolo_stub([{"bbox": {"x": 0, "y": 0, "w": FRAME_W, "h": FRAME_H}, "class": "figure", "score": 0.9}])
+    vlm = VlmStub()
+    vlm.script_content('{"kind": "chart", "struct": {"chart_type": "bar"}, "confidence": 0.9}')
+    assert run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path) == []
+
+
+def test_gate_insight_series_inconsistency_rejected(tmp_path):
+    """The triangle bug: insight says 'uniform' but series varies → reject."""
+    yolo = make_yolo_stub([{"bbox": {"x": 0, "y": 0, "w": 60, "h": 60}, "class": "figure", "score": 0.9}])
+    vlm = VlmStub()
+    vlm.script_content(json.dumps({
+        "kind": "chart",
+        "struct": {"chart_type": "line", "axes": {"x": "", "y": ""},
+                   "series": [{"name": "", "points": [{"x": 0, "y": 0}, {"x": 1, "y": 1}, {"x": 2, "y": 0}]}],
+                   "insight": "a uniform distribution with constant density"},
+        "confidence": 0.9,
+    }))
+    assert run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path) == []
+
+
+def test_self_consistency_mismatch_drops(tmp_path):
+    """Two classify calls disagree on kind → label-only (ambiguous crop)."""
+    yolo = make_yolo_stub([{"bbox": {"x": 0, "y": 0, "w": 60, "h": 60}, "class": "figure", "score": 0.9}])
+    vlm = VlmStub()
+    vlm.script_content(
+        '{"kind": "chart", "struct": {"chart_type": "bar"}, "confidence": 0.9}',
+        '{"kind": "diagram", "struct": {}, "confidence": 0.9}',
+    )
+    figs = run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path, self_consistency=True)
+    assert figs == []
+
+
+def test_self_consistency_agreement_keeps(tmp_path):
+    yolo = make_yolo_stub([{"bbox": {"x": 0, "y": 0, "w": 60, "h": 60}, "class": "figure", "score": 0.9}])
+    vlm = VlmStub()
+    vlm.script_content(CHART_REPLY, CHART_REPLY)  # both calls agree → kept
+    figs = run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path, self_consistency=True)
+    assert len(figs) == 1 and figs[0].kind == "chart"

@@ -57,7 +57,10 @@ NUM_DECILES = 10
 # Section split: [0, 15) has no marker; [15, 30) carries it (when enabled).
 SECTION_SPLIT_SEC = 15.0
 
-LOW_OCR_CONF = 0.4  # < figure_extract.LOW_CONF_THRESHOLD → must be flagged
+# In the FLAG band [GATE_CONF_FLOOR 0.55, LOW_CONF_THRESHOLD 0.7): kept but
+# flagged 'unverified'. Below 0.55 the selection gate REJECTS (저신뢰=탈락) —
+# this fixture targets the flag behavior, so it sits above the reject floor.
+LOW_OCR_CONF = 0.6
 CHART_CONF = 0.9
 
 CHART_STRUCT = {
@@ -138,12 +141,21 @@ class ScriptedVlm:
     def __init__(self):
         self.classify_calls = 0
         self.ocr_calls = 0
+        # Per-crop kind cache: deterministic by image_url so the self-
+        # consistency gate (two classify calls per crop) sees a STABLE answer
+        # — keyed on the crop, not the call count.
+        self._kind_by_url: dict[str, dict] = {}
 
     def classify_crop(self, image_url, prompt, caption_slice=None):
         self.classify_calls += 1
-        if self.classify_calls % 2 == 1:
-            return {"kind": "chart", "struct": CHART_STRUCT, "confidence": CHART_CONF}
-        return {"kind": "equation", "struct": {}, "confidence": 0.8}
+        if image_url not in self._kind_by_url:
+            if len(self._kind_by_url) % 2 == 0:
+                self._kind_by_url[image_url] = {
+                    "kind": "chart", "struct": CHART_STRUCT, "confidence": CHART_CONF
+                }
+            else:
+                self._kind_by_url[image_url] = {"kind": "equation", "struct": {}, "confidence": 0.8}
+        return self._kind_by_url[image_url]
 
     def equation_ocr(self, image_url, prompt):
         self.ocr_calls += 1
