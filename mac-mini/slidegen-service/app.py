@@ -44,6 +44,7 @@ from captions import detect_topic_changes
 from typing_select import select_keyframes
 from figure_extract import ExtractedFigure, extract_figures as cv_extract_figures
 from bundle import assemble_resources
+from observability import StageArtifactSink
 from redraw import vector_redraw  # noqa: F401
 
 app = FastAPI(title="insighta-slidegen-cv", version="0.1.0")
@@ -94,6 +95,12 @@ class GenerateRequest(BaseModel):
     # keep pre-PR-F3 callers (time bounds only) working unchanged.
     title: str = ""
     transcript: str = ""
+    # Observability: when set, each CV stage dumps its decisions/data here for
+    # review. `artifact_index` is the ANONYMOUS label (e.g. "V02") — the real
+    # youtube_video_id is never written to the tree (PUBLIC-repo rule). Unset =
+    # no dump (existing behavior).
+    artifacts_dir: str | None = None
+    artifact_index: str = "V00"
 
 
 class GenerateResponse(BaseModel):
@@ -330,6 +337,7 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
     # ADR 0004 fallback attribution: which DDL stage each pipeline step maps
     # to. A raised ModelEndpointError overrides this with its own .stage.
     stage: str | None = "acquire"
+    sink = StageArtifactSink(req.artifacts_dir, req.artifact_index)
     try:
         _jobs[job_id]["status"] = "running"
         _jobs[job_id]["stage"] = stage
@@ -365,6 +373,8 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
             youtube_video_id=req.youtube_video_id,
         )
         _jobs[job_id]["progress_pct"] = 65.0
+        # 01-keyframes / 03-select: candidate count + per-frame routing decision.
+        sink.keyframes(len(candidates), selected)
         stage = "numerize"
         _jobs[job_id]["stage"] = stage
 
@@ -376,6 +386,9 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
             selected, yolo=yolo, vlm=vlm, out_dir=frames_dir / "crops"
         )
         _jobs[job_id]["progress_pct"] = 80.0
+        # 02-detect / 04-numerize: YOLO boxes + struct/LaTeX per figure.
+        sink.detect_and_numerize(figures)
+        sink.write_manifest()
         # bundle is resource assembly, not a model stage — a failure there is
         # outside the DDL stage domain (None → manual attribution).
         stage = None

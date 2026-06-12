@@ -69,6 +69,12 @@ export interface RealPipelineDeps {
   prisma: PrismaClient;
   /** Local dir for .pptx artifacts — keyed by INDEX (never videoId). */
   artifactsDir: string;
+  /**
+   * Observability: when set, the CV SERVICE writes its per-stage tree under
+   * `<cvArtifactsRoot>/<index>` on the service host (Mac Mini). Pulling that
+   * tree to the local review dir is an ops/follow-up step. Unset = no dump.
+   */
+  cvArtifactsRoot?: string;
   cvTimeoutMs?: number;
   /**
    * Config slice (mode + OpenRouter key). When absent, resolved from
@@ -172,6 +178,14 @@ export function buildRealPipeline(deps: RealPipelineDeps): PipelineFn {
           sections: cvSections,
           mode: appConfig.SLIDEGEN_MODE,
           title: summary.core.one_liner,
+          // Observability: the SERVICE writes the per-stage tree (its own
+          // filesystem) keyed by the anonymous index — never the video id.
+          ...(deps.cvArtifactsRoot
+            ? {
+                artifacts_dir: `${deps.cvArtifactsRoot}/${entry.index}`,
+                artifact_index: entry.index,
+              }
+            : {}),
         },
         { timeoutMs: cvTimeoutMs }
       );

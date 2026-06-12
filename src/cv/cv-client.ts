@@ -47,6 +47,13 @@ export interface CvGenerateRequest {
    */
   title?: string;
   transcript?: string;
+  /**
+   * Observability: when set, the service dumps per-stage decisions/data here
+   * (01-keyframes … 04-numerize). `artifact_index` is the ANONYMOUS label —
+   * the real video id is never written to the tree (PUBLIC-repo rule).
+   */
+  artifacts_dir?: string;
+  artifact_index?: string;
 }
 
 export interface CvJobStatus {
