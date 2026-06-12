@@ -77,6 +77,29 @@ def test_download_video_raises_on_failure(tmp_path):
             _download_video("invalid_id", tmp_path / "video.mp4")
 
 
+def test_download_video_uses_proxy_when_env_set(tmp_path, monkeypatch):
+    """SLIDEGEN_YTDLP_PROXY set → yt-dlp gets --proxy <url>; unset → no flag
+    (the no-op default is the rollback path — must stay direct)."""
+    from acquire import ENV_YTDLP_PROXY, _download_video
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+
+    # Synthetic proxy URL — fixture only, never a real credential.
+    monkeypatch.setenv(ENV_YTDLP_PROXY, "http://user:pass@proxy.example:1080")
+    with patch("acquire.subprocess.run", return_value=mock_result) as mock_run:
+        _download_video("12345678abc", tmp_path / "video.mp4")
+    cmd = mock_run.call_args[0][0]
+    proxy_at = cmd.index("--proxy")
+    assert cmd[proxy_at + 1] == "http://user:pass@proxy.example:1080"
+    assert cmd[-1].endswith("12345678abc")  # url stays the last arg
+
+    monkeypatch.delenv(ENV_YTDLP_PROXY)
+    with patch("acquire.subprocess.run", return_value=mock_result) as mock_run:
+        _download_video("12345678abc", tmp_path / "video2.mp4")
+    assert "--proxy" not in mock_run.call_args[0][0]
+
+
 def test_extract_section_frames_creates_jpegs(tmp_path):
     """_extract_section_frames should create JPEG files with correct naming."""
     from acquire import _extract_section_frames

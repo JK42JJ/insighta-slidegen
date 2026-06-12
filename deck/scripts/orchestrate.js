@@ -48,12 +48,15 @@ function buildResourcePrompt(type, r) {
     "수식(LaTeX/기호): " + JSON.stringify(r.formulas || []),
     "그래프 설명/데이터 포인트: " + JSON.stringify(r.charts || []),
     "주의: 그래프/수식은 '재작도·재렌더' 대상이다. 원본 스크린샷을 붙이지 말고, 핵심 데이터·관계·수식만 콘텐츠 필드로 옮겨라(스킬이 네이티브 도형/고해상 그래프/텍스트 수식으로 렌더한다).",
+    // PR-A figureRef: tell the model to PLACE the regenerated figures (it only
+    // chooses which figure_id goes where + writes a caption — never a path).
+    "[figure 배치] 위 charts/수식 항목 각각에 figure_id가 있다. 슬라이드에 실제 그래프/수식을 넣으려면 출력 JSON 최상위에 figures 배열을 추가하라: figures=[{\"figure_id\":\"<위 항목의 id>\",\"kind\":\"chart|table|diagram|equation\",\"title\":\"짧은 제목\",\"caption\":\"한 줄 설명\"}]. figure_id는 반드시 위 charts/formulas에 존재하는 것만. 렌더 가능한 항목은 빠짐없이 figures에 넣어라(렌더 실패분은 자동으로 라벨만 남는다).",
   ].join("\n\n");
 }
 
 /* 메인: 분류 → 추출 → 빌드 → 검증 → 되먹임(자가수정) 루프. */
 async function orchestrate(resources, outPath, opts = {}) {
-  const { llm = (m) => callOpenRouter(m, opts.openrouter || {}), classify, minSlides = 12, maxAttempts = 3, link } = opts;
+  const { llm = (m) => callOpenRouter(m, opts.openrouter || {}), classify, minSlides = 12, maxAttempts = 3, link, figureAssets } = opts;
   const routed = classify
     ? await classify(resources)
     : await route({ title: resources.title, description: resources.description, transcript: resources.transcript }, { mode: "hybrid", llm: (p) => llm([{ role: "user", content: p }]) });
@@ -69,7 +72,7 @@ async function orchestrate(resources, outPath, opts = {}) {
       messages.push({ role: "assistant", content: raw }, { role: "user", content: "JSON 파싱 실패. 설명 없이 스키마에 맞는 순수 JSON만 다시 출력하라." });
       continue;
     }
-    await buildRecipe(type, content, outPath, { link, silent: true });
+    await buildRecipe(type, content, outPath, { link, figureAssets, silent: true });
     const v = validate(outPath, minSlides);
     if (v.pass) return { ok: true, type, attempts: attempt, out: outPath, routedFrom: routed.source };
     lastReport = v.report;

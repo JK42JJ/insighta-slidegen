@@ -166,3 +166,70 @@ def test_select_keyframes_end_to_end_mock(monkeypatch):
     result = select_keyframes(_candidates(6), [])
     assert len(result) == 6  # mock marks all as slides
     assert all(s.frame_type for s in result)
+
+
+def test_http_backend_chunks_windows_and_concats_in_order(tmp_path):
+    """PR-H2 capacity guard: a window larger than ROUTING_MAX_FRAMES_PER_CALL
+    splits into sub-calls (measured live: one 27k-token window vs 16,384
+    max-model-len) and results concatenate 1:1 with candidate order."""
+    import cv2
+    import numpy as np
+
+    from frames import FrameCandidate
+    from vlm_router import ROUTING_MAX_FRAMES_PER_CALL, HttpBackend
+
+    frame_path = tmp_path / "synth.jpg"
+    cv2.imwrite(str(frame_path), np.full((64, 64, 3), 128, dtype=np.uint8))
+    total = ROUTING_MAX_FRAMES_PER_CALL * 2 + 3
+    candidates = [
+        FrameCandidate(frame_path, float(i), 0, 0.9, False) for i in range(total)
+    ]
+
+    class RecordingClient:
+        def __init__(self):
+            self.batch_sizes: list[int] = []
+
+        def select_and_classify(self, image_urls, prompt, captions_text=None):
+            self.batch_sizes.append(len(image_urls))
+            return [
+                {"is_slide": True, "frame_type": "chart", "confidence": 0.9}
+                for _ in image_urls
+            ]
+
+    client = RecordingClient()
+    results = HttpBackend(client=client).route(candidates, captions_text="hint")
+
+    assert client.batch_sizes == [
+        ROUTING_MAX_FRAMES_PER_CALL,
+        ROUTING_MAX_FRAMES_PER_CALL,
+        3,
+    ]
+    assert len(results) == total
+    assert all(r["frame_type"] == "chart" for r in results)
+
+
+def test_routing_data_url_downscales_large_frames(tmp_path):
+    """Routing thumbnails: a frame larger than ROUTING_IMAGE_MAX_DIM is
+    re-encoded with its longest side capped; small frames pass through."""
+    import base64
+    import io
+
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    from vlm_router import ROUTING_IMAGE_MAX_DIM, _routing_data_url
+
+    big = tmp_path / "big.jpg"
+    cv2.imwrite(str(big), np.full((720, 1280, 3), 100, dtype=np.uint8))
+    url = _routing_data_url(big)
+    payload = base64.b64decode(url.split(",", 1)[1])
+    with Image.open(io.BytesIO(payload)) as img:
+        assert max(img.size) <= ROUTING_IMAGE_MAX_DIM
+
+    small = tmp_path / "small.jpg"
+    cv2.imwrite(str(small), np.full((100, 160, 3), 100, dtype=np.uint8))
+    small_url = _routing_data_url(small)
+    small_payload = base64.b64decode(small_url.split(",", 1)[1])
+    with Image.open(io.BytesIO(small_payload)) as img:
+        assert img.size == (160, 100)

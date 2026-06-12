@@ -39,12 +39,14 @@ Entry: extract_figures(selected_frames, yolo=..., vlm=...) → list[ExtractedFig
 from __future__ import annotations
 
 import hashlib
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 
+from model_clients import VlmContractError
 from typing_select import SelectedFrame
 from vlm_router import _image_data_url as image_data_url
 
@@ -68,29 +70,79 @@ VERIFICATION_UNVERIFIED = "unverified"
 # Mode-B kind that routes a crop to mode-C equation OCR. The kind authority is
 # Qwen's mode-B decision — never YOLO's advisory class (ADR 0002 D2/D7).
 EQUATION_KIND = "equation"
+# Mode-B kinds that ARE deck figures (FigureRefSchema enum, slide-manifest.ts).
+# The prompt also offers "text"/"photo" as VETO answers for detector
+# over-detections (§3.4) — those crops are dropped, never shipped.
+MODE_B_FIGURE_KINDS = frozenset({"chart", "diagram", "table", "equation", "screenshot"})
 # Kind recorded for unflagged frames (no crop, keyframe row only).
 KEYFRAME_KIND = "keyframe"
+
+# ── Selection gate (fail-closed, PR review finding) ──────────────────────────
+# ROOT CAUSE: Qwen hallucinates a chart/struct for NON-chart crops (handwriting,
+# titles, logos, UI badges). The gate REJECTS a crop before it pollutes the
+# bundle when ANY of: kind is a reject class, confidence below the floor, the
+# chart struct contradicts its own insight, the crop is an over-large bbox, or
+# two extraction calls disagree (self-consistency). Reject → label-only (never
+# a garbage struct). "When unsure, reject" is the contract.
+REJECT_KINDS = frozenset({"handwriting", "title", "decoration", "ui_badge", "text", "photo", "none"})
+# Below this confidence a figure is rejected, not numerized (fail-closed).
+GATE_CONF_FLOOR = 0.55
+# A crop covering more than this fraction of the frame is likely a whole-board
+# over-detection (formula[3]: the entire blackboard as one bbox) → reject.
+MAX_CROP_AREA_FRAC = 0.85
+
+
+def _chart_struct_consistent(struct: dict | None) -> tuple[bool, str]:
+    """insight↔series sanity (PR review: 'uniform/constant' insight but a
+    triangular series is a numerize hallucination). Returns (ok, reason)."""
+    if not isinstance(struct, dict):
+        return True, ""
+    insight = str(struct.get("insight", "")).lower()
+    ys: list[float] = []
+    for ser in struct.get("series") or []:
+        for p in ser.get("points") or []:
+            v = p.get("y", p.get("value"))
+            if isinstance(v, (int, float)):
+                ys.append(float(v))
+    flat_claim = any(k in insight for k in ("uniform", "constant", "균등", "flat", "동일"))
+    if flat_claim and len(set(ys)) > 1:
+        return False, f"insight='{insight[:30]}'(flat) but series varies {ys[:6]}"
+    return True, ""
 
 # ── Mode B/C prompt contents (PR-F scope per CONTRACT §7; wire shape is §2.2) ─
 CROP_CLASSIFY_PROMPT = (
     "You classify ONE cropped region from a knowledge-video frame. The "
-    "detector already decided WHERE this region is; you decide WHAT it is. "
-    "Reply with ONLY JSON, no prose: "
-    '{"kind": "chart"|"diagram"|"table"|"equation"|"text"|"photo", '
+    "detector decided WHERE; you decide WHAT — and CRITICALLY, whether it is a "
+    "real quantitative figure at all. Reply with ONLY JSON, no prose: "
+    '{"kind": "chart"|"diagram"|"table"|"equation"  '
+    '|"handwriting"|"title"|"decoration"|"ui_badge"|"text"|"photo"|"none", '
     '"struct": <for kind=chart: {"chart_type": "line"|"bar"|"scatter", '
     '"axes": {"x": "", "y": ""}, '
     '"series": [{"name": "", "points": [{"x": 0, "y": 0}]}], '
-    '"insight": "one sentence"}; '
-    'for kind=table: {"headers": [], "rows": [[]]}; otherwise {}>, '
-    '"confidence": <float 0..1>}. '
-    "Approximate readings are fine; never invent series or values that are "
-    "not visible. Report low confidence instead of guessing."
+    '"insight": "one sentence"}; for kind=table: {"headers": [], "rows": [[]]}; '
+    'otherwise {}>, "confidence": <float 0..1>}. '
+    "REJECT RULES — return the reject kind with EMPTY struct, do NOT invent a "
+    "chart: hand-drawn sketches/handwriting on a board → \"handwriting\"; a "
+    "slide/section TITLE or heading text → \"title\"; a logo, icon, or "
+    "ornamental graphic → \"decoration\"; a UI button/badge/chip → \"ui_badge\"; "
+    "plain prose → \"text\"; a photo/screenshot of a scene → \"photo\"; nothing "
+    "legible or not a figure → \"none\". A chart/table/equation kind REQUIRES "
+    "actual axes/cells/symbols you can READ — if you are guessing the numbers, "
+    "it is NOT a chart: choose a reject kind and low confidence. When unsure, "
+    "REJECT. Never invent series or values that are not visibly present; the "
+    "insight MUST match the data you read (do not say 'uniform' for a rising "
+    "curve)."
 )
 EQUATION_OCR_PROMPT = (
     "Transcribe the mathematical content of this cropped image to LaTeX. "
     'Reply with ONLY JSON, no prose: {"latex": "<LaTeX, no surrounding $>", '
     '"confidence": <float 0..1>}. '
-    "Report low confidence instead of guessing unreadable symbols."
+    "If the crop is NOT a self-contained equation (it is a title, a whole "
+    "blackboard with mixed prose, or unreadable), set confidence below 0.5 and "
+    "transcribe only the math you can actually read — never pad with the slide "
+    "title or surrounding prose. Report low confidence instead of guessing "
+    "unreadable symbols (transcribe a genuinely-handwritten '?' faithfully, but "
+    "do not emit '?'/'@' as a stand-in for a letter you could not read)."
 )
 
 _CROP_ID_LEN = 16  # hex chars of the sha1 kept as cv_figure_id
@@ -122,6 +174,7 @@ def extract_figures(
     yolo,
     vlm,
     out_dir: Path | str | None = None,
+    self_consistency: bool = True,
 ) -> list[ExtractedFigure]:
     """
     YOLO-crop + Qwen-numerize the selected keyframes.
@@ -138,7 +191,8 @@ def extract_figures(
     Returns one ExtractedFigure per detected region of each flagged frame,
     plus one `keyframe` entry per unflagged frame. Raises ModelEndpointError
     (stage `detect` / `recognize`) on endpoint failure — attribution is
-    preserved for ADR 0004 §4 stats.
+    preserved for ADR 0004 §4 stats. A per-crop CONTRACT failure (broken JSON
+    after the re-ask) only skips that crop (logged), never the whole video.
     """
     crops_dir = Path(out_dir) if out_dir else Path(tempfile.mkdtemp(prefix="slidegen_crops_"))
     crops_dir.mkdir(parents=True, exist_ok=True)
@@ -180,22 +234,81 @@ def extract_figures(
             if clamped is None:
                 continue
             x, y, w, h = clamped
+            # GATE #2 — over-large bbox (whole-board over-detection): reject
+            # before numerize so a blackboard-as-one-box can't become a struct.
+            if (w * h) / float(img_w * img_h) > MAX_CROP_AREA_FRAC:
+                sys.stderr.write(
+                    f"figure_extract: oversize crop rejected "
+                    f"(t={timestamp}s box={box_index} area={(w * h) / (img_w * img_h):.2f})\n"
+                )
+                continue
             crop_path = crops_dir / f"{frame.candidate.path.stem}_crop{box_index}.png"
             cv2.imwrite(str(crop_path), image[y : y + h, x : x + w])
             crop_url = image_data_url(crop_path)
 
             # WHAT: mode B per-crop kind + struct (stage `recognize` on failure).
-            classification = vlm.classify_crop(
-                crop_url, CROP_CLASSIFY_PROMPT, caption_slice=_caption_slice(frame)
-            )
-            kind = classification["kind"]
+            # A CONTRACT failure (model emitted broken JSON even after the
+            # single re-ask) is a per-CROP weakness, not a per-VIDEO failure:
+            # skip the crop and keep extracting (flag-don't-kill — ADR 0003 D3
+            # granularity; counts surface via the skip log). Endpoint/infra
+            # errors (5xx, network) still raise — those ARE stage failures.
+            def _drop(reason: str, _t: int = timestamp, _b: int = box_index) -> None:
+                sys.stderr.write(f"figure_extract: gate reject (t={_t}s box={_b}): {reason}\n")
 
-            if kind == EQUATION_KIND:
-                # Mode C: Qwen OCR → LaTeX (ADR 0003 D3; stage `recognize`).
-                ocr = vlm.equation_ocr(crop_url, EQUATION_OCR_PROMPT)
-                latex, struct, conf = ocr["latex"], None, ocr["confidence"]
-            else:
-                latex, struct, conf = None, classification["struct"], classification["confidence"]
+            try:
+                classification = vlm.classify_crop(
+                    crop_url, CROP_CLASSIFY_PROMPT, caption_slice=_caption_slice(frame)
+                )
+                kind = classification["kind"]
+
+                # GATE #1 — reject class (Qwen's own veto: handwriting/title/
+                # decoration/ui_badge/text/photo/none). Fail-closed root fix.
+                if kind in REJECT_KINDS or kind not in MODE_B_FIGURE_KINDS:
+                    _drop(f"reject kind={kind}")
+                    continue
+
+                # GATE #3 — self-consistency: a second classify must agree on
+                # kind, else the crop is ambiguous → label-only (a↔@ drift).
+                # Doubles the per-crop call; on by default in prod.
+                if self_consistency:
+                    second = vlm.classify_crop(
+                        crop_url, CROP_CLASSIFY_PROMPT, caption_slice=_caption_slice(frame)
+                    )
+                    if second["kind"] != kind:
+                        _drop(f"self-consistency: kind {kind} != {second['kind']}")
+                        continue
+
+                if kind == EQUATION_KIND:
+                    # Mode C: Qwen OCR → LaTeX (ADR 0003 D3; stage `recognize`).
+                    ocr = vlm.equation_ocr(crop_url, EQUATION_OCR_PROMPT)
+                    latex, struct, conf = ocr["latex"], None, ocr["confidence"]
+                else:
+                    latex, struct, conf = (
+                        None,
+                        classification["struct"],
+                        classification["confidence"],
+                    )
+            except VlmContractError as exc:
+                sys.stderr.write(
+                    f"figure_extract: crop contract error skipped "
+                    f"(t={timestamp}s box={box_index}): {exc}\n"
+                )
+                continue
+
+            # GATE #4 — confidence floor (fail-closed: low conf = reject, not
+            # numerize). A genuine figure clears the floor; a hallucination on a
+            # non-figure crop reports low confidence (the prompt asks for it).
+            if conf is None or conf < GATE_CONF_FLOOR:
+                _drop(f"low confidence {conf}")
+                continue
+
+            # GATE #5 — insight↔series consistency (chart structs only): the
+            # numerize-hallucination check (triangle data under a 'uniform'
+            # insight). Inconsistent → label-only, never a garbage struct.
+            ok, why = _chart_struct_consistent(struct)
+            if not ok:
+                _drop(f"struct inconsistent: {why}")
+                continue
 
             figures.append(
                 ExtractedFigure(

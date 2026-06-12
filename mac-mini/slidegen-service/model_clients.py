@@ -45,6 +45,11 @@ ENV_VLM_TOKEN = "SLIDEGEN_VLM_TOKEN"
 ENV_VLM_MODEL = "SLIDEGEN_VLM_MODEL"
 ENV_YOLO_BASE_URL = "SLIDEGEN_YOLO_BASE_URL"
 ENV_YOLO_TOKEN = "SLIDEGEN_YOLO_TOKEN"
+# Per-call read budget override (seconds) — tuning knob, not a secret.
+# PR-H2 live measurement: mode-A windows on the serving host exceeded the
+# 120 s default (read timeout after 3 attempts) before window chunking; the
+# knob lets ops match the budget to the host without a code change.
+ENV_VLM_TIMEOUT_SEC = "SLIDEGEN_VLM_TIMEOUT_SEC"
 
 # Backend name that opts into live HTTP endpoints (§5); anything else = no live calls.
 HTTP_BACKEND_NAME = "http"
@@ -62,6 +67,12 @@ DEFAULT_CONF_THRESHOLD = 0.15  # §3.2 LOW default = over-detect (ADR 0002 D2, r
 DEFAULT_MAX_BOXES = 50  # §3.2 optional guard
 
 ROUTING_TEMPERATURE = 0.0  # §2.1 — temperature 0 for ALL routing/classification calls
+# Completion ceiling (PR-H2 live finding): with no max_tokens the server may
+# generate to max-model-len — a runaway struct measured >300 s/call on the
+# serving GPU (read-timeout x3 killed the video). 4096 covers every §2.2 mode
+# reply with slack; a truncated runaway becomes a CONTRACT error, which the
+# per-crop skip absorbs. Tuning knob, not a secret.
+MAX_COMPLETION_TOKENS = 4096
 # §1 topology: Qwen3-VL-8B is the contract serving model (vlm_router keeps its
 # own local-backend default; this applies to from_env() construction only).
 DEFAULT_VLM_MODEL = "qwen3-vl-8b-instruct"
@@ -327,6 +338,8 @@ class VlmHttpClient:
         if not base_url:
             raise LiveConfigRefusedError(f"{ENV_VLM_BASE_URL} is not set")
         model = kwargs.pop("model", None) or env.get(ENV_VLM_MODEL) or DEFAULT_VLM_MODEL
+        if "timeout_sec" not in kwargs and env.get(ENV_VLM_TIMEOUT_SEC):
+            kwargs["timeout_sec"] = float(env[ENV_VLM_TIMEOUT_SEC])
         return cls(base_url, env.get(ENV_VLM_TOKEN, ""), model, **kwargs)
 
     def close(self) -> None:
@@ -426,6 +439,7 @@ class VlmHttpClient:
         payload = {
             "model": self.model,
             "temperature": ROUTING_TEMPERATURE,  # §2.1 — always 0
+            "max_tokens": MAX_COMPLETION_TOKENS,  # runaway-generation ceiling
             "messages": messages,
         }
         response = _request_with_retry(

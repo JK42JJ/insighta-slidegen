@@ -214,3 +214,69 @@ describe('isCvServiceHealthy', () => {
     ).resolves.toBe(false);
   });
 });
+
+describe('transient-network tolerance (live tailnet blip)', () => {
+  it('retries a thrown network error on submit, then succeeds', async () => {
+    let calls = 0;
+    const responses = [
+      jsonResponse({ job_id: 'job-n1' }),
+      jsonResponse({ job_id: 'job-n1', status: 'done', progress_pct: 100 }),
+      jsonResponse({ job_id: 'job-n1', figures: [], keyframe_count: 0, resources: RESOURCES }),
+    ];
+    const fetchImpl = (async () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError('fetch failed');
+      return responses.shift()!;
+    }) as typeof fetch;
+
+    const result = await extractFigures(REQUEST, {
+      fetchImpl,
+      sleep: noSleep,
+      serviceUrl: 'http://cv.test',
+    });
+    expect(result.job_id).toBe('job-n1');
+  });
+
+  it('tolerates poll blips up to the tolerance, then keeps polling to done', async () => {
+    let polls = 0;
+    const fetchImpl = (async (url: unknown) => {
+      const u = String(url);
+      if (u.includes('/slides/generate')) return jsonResponse({ job_id: 'job-n2' });
+      if (u.includes('/slides/status')) {
+        polls += 1;
+        if (polls <= 3) throw new TypeError('fetch failed');
+        return jsonResponse({ job_id: 'job-n2', status: 'done', progress_pct: 100 });
+      }
+      return jsonResponse({
+        job_id: 'job-n2',
+        figures: [],
+        keyframe_count: 0,
+        resources: RESOURCES,
+      });
+    }) as typeof fetch;
+
+    const result = await extractFigures(REQUEST, {
+      fetchImpl,
+      sleep: noSleep,
+      serviceUrl: 'http://cv.test',
+    });
+    expect(result.job_id).toBe('job-n2');
+    expect(polls).toBe(4);
+  });
+
+  it('gives up after sustained poll failure with the last-seen stage', async () => {
+    const fetchImpl = (async (url: unknown) => {
+      const u = String(url);
+      if (u.includes('/slides/generate')) return jsonResponse({ job_id: 'job-n3' });
+      throw new TypeError('fetch failed');
+    }) as typeof fetch;
+
+    const error = await extractFigures(REQUEST, {
+      fetchImpl,
+      sleep: noSleep,
+      serviceUrl: 'http://cv.test',
+    }).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(CvExtractionError);
+    expect((error as CvExtractionError).message).toContain('status failed 6x');
+  });
+});

@@ -18,6 +18,7 @@ Mode note: this module has no vision API calls; mode gate is irrelevant here.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -25,6 +26,12 @@ import cv2
 
 
 FRAME_RATE = 1  # frames per second extracted from video
+
+# Residential-egress rule: yt-dlp runs on the Mac Mini ONLY, and goes out via
+# the Webshare proxy rather than the bare home IP. Full proxy URL
+# (http://user:pass@host:port) injected at service launch; unset = direct
+# (existing behavior — env default stays a no-op per the config rollback rule).
+ENV_YTDLP_PROXY = "SLIDEGEN_YTDLP_PROXY"
 
 
 def download_frames(
@@ -60,7 +67,7 @@ def download_frames(
 
 
 def _download_video(youtube_video_id: str, output_path: Path) -> None:
-    """Download video from YouTube using yt-dlp."""
+    """Download video from YouTube using yt-dlp (proxied when configured)."""
     url = f"https://www.youtube.com/watch?v={youtube_video_id}"
     cmd = [
         "yt-dlp",
@@ -69,8 +76,11 @@ def _download_video(youtube_video_id: str, output_path: Path) -> None:
         "-o",
         str(output_path),
         "--no-playlist",
-        url,
     ]
+    proxy = os.environ.get(ENV_YTDLP_PROXY, "")
+    if proxy:
+        cmd += ["--proxy", proxy]
+    cmd.append(url)
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if result.returncode != 0:
         raise RuntimeError(f"yt-dlp failed: {result.stderr}")

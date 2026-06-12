@@ -78,6 +78,8 @@ def test_mode_a_happy_path():
 
 def test_mode_a_request_shape():
     """§2.1: image_url parts, temperature 0, model from config, bearer auth."""
+    from model_clients import MAX_COMPLETION_TOKENS
+
     stub = VlmStub()
     stub.script_content('[{"is_slide": true}]')
     client = make_vlm_client(stub)
@@ -88,6 +90,8 @@ def test_mode_a_request_shape():
     payload = stub.request_payloads()[0]
     assert payload["temperature"] == 0
     assert payload["model"] == stub.model
+    # PR-H2: runaway-generation ceiling — measured >300 s/call without it.
+    assert payload["max_tokens"] == MAX_COMPLETION_TOKENS
     parts = payload["messages"][0]["content"]
     image_parts = [p for p in parts if p["type"] == "image_url"]
     text_parts = [p for p in parts if p["type"] == "text"]
@@ -528,3 +532,19 @@ def test_http_backend_empty_input_no_calls():
 
     backend = HttpBackend()  # no client constructed — would raise if touched
     assert backend.route([]) == []
+
+
+def test_from_env_reads_timeout_knob():
+    """PR-H2: SLIDEGEN_VLM_TIMEOUT_SEC overrides the 120 s default read budget
+    (mode-A windows measured >120 s on the serving host)."""
+    from model_clients import DEFAULT_TIMEOUT_SEC, VlmHttpClient
+
+    env = _live_env(SLIDEGEN_MODE="prod", SLIDEGEN_VLM_TIMEOUT_SEC="300")
+    vlm = VlmHttpClient.from_env(env)
+    assert vlm._http.timeout.read == 300.0
+    vlm.close()
+
+    env_default = _live_env(SLIDEGEN_MODE="prod")
+    vlm_default = VlmHttpClient.from_env(env_default)
+    assert vlm_default._http.timeout.read == DEFAULT_TIMEOUT_SEC
+    vlm_default.close()

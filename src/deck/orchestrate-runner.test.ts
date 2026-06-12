@@ -25,11 +25,13 @@
  */
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
   buildLlm,
+  normalizeDeckContent,
   regenCharts,
   runOrchestrate,
   vendoredValidatorPath,
@@ -105,6 +107,60 @@ afterAll(() => {
   for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
 });
 
+describe('figure placement — PR-A figureRef → vendored figureSlide → validate gate', () => {
+  // 1x1 PNG — pptxgenjs embeds it; no matplotlib needed (chart_regen render
+  // is covered in py/tests). These tests exercise the PLACEMENT path:
+  // figureRef + figureAssets → vendored figureSlide → embedded media + gate.
+  const ONE_PX_PNG =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  const loadRecipes = () =>
+    createRequire(vendoredValidatorPath())(
+      path.join(path.dirname(vendoredValidatorPath()), 'deck_recipes.js')
+    ) as { buildRecipe: (t: string, c: unknown, o: string, x: object) => Promise<unknown> };
+
+  it('places a referenced figure into the deck → gate passes', { timeout: 60_000 }, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slidegen-fig-'));
+    tempDirs.push(dir);
+    const png = path.join(dir, 'fig.png');
+    fs.writeFileSync(png, Buffer.from(ONE_PX_PNG, 'base64'));
+    const outPath = path.join(dir, 'deck.pptx');
+
+    const content = {
+      ...passContent,
+      figures: [{ figure_id: 'fig-1', kind: 'chart', title: 'Fig 1', caption: 'cap' }],
+    };
+    await loadRecipes().buildRecipe('howto', content, outPath, {
+      figureAssets: { 'fig-1': png },
+      silent: true,
+    });
+    const report = execFileSync(
+      'python3',
+      [vendoredValidatorPath(), outPath, '--min-slides', '6', '--require-figures', '1'],
+      { encoding: 'utf8' }
+    );
+    expect(report).toContain('RESULT: PASS');
+  });
+
+  it('require-figures gate FAILS a figure-less deck', { timeout: 60_000 }, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slidegen-nofig-'));
+    tempDirs.push(dir);
+    const outPath = path.join(dir, 'deck.pptx');
+    await loadRecipes().buildRecipe('howto', passContent, outPath, { silent: true });
+    let failed = false;
+    try {
+      execFileSync(
+        'python3',
+        [vendoredValidatorPath(), outPath, '--min-slides', '6', '--require-figures', '1'],
+        { encoding: 'utf8' }
+      );
+    } catch (e) {
+      failed = true;
+      expect(String((e as { stdout?: string }).stdout)).toContain('figure 미배치');
+    }
+    expect(failed).toBe(true);
+  });
+});
+
 describe('build E2E — stub llm FAIL → feedback → PASS → .pptx (real vendored chain)', () => {
   it(
     'self-corrects in exactly 2 llm calls and produces a validate_deck-PASSing deck',
@@ -146,8 +202,9 @@ describe('build E2E — stub llm FAIL → feedback → PASS → .pptx (real vend
       );
       expect(report).toContain('RESULT: PASS');
 
-      // Integrated chart-regen: the unsupported struct stayed label-only.
-      expect(result.chartAssets).toEqual([{ snapshot: 0, pngPath: null }]);
+      // Integrated chart-regen: the unsupported struct stayed label-only (the
+      // first asset is the chart; PR-A also appends a formula asset).
+      expect(result.chartAssets[0]).toEqual({ figureId: null, snapshot: 0, pngPath: null });
     }
   );
 });
@@ -177,7 +234,11 @@ describe('llm gating — vendored callOpenRouter default is unreachable from the
   });
 
   it('ALWAYS passes the injected llm to orchestrate (default param never engages)', async () => {
-    const stub: LlmFn = () => Promise.resolve('{}');
+    let stubCalls = 0;
+    const stub: LlmFn = () => {
+      stubCalls += 1;
+      return Promise.resolve('{}');
+    };
     let receivedLlm: LlmFn | undefined;
     const impl: OrchestrateFn = (_resources, out, opts) => {
       receivedLlm = opts.llm;
@@ -189,8 +250,12 @@ describe('llm gating — vendored callOpenRouter default is unreachable from the
       llm: stub,
       orchestrateImpl: impl,
     });
-    // Identity check: orchestrate received OUR closure, not a vendored default.
-    expect(receivedLlm).toBe(stub);
+    // Behavior check: orchestrate received a defined llm whose replies come
+    // from OUR injected stub (wrapped by the deterministic normalizer — so
+    // identity is intentionally NOT the contract), never a vendored default.
+    expect(receivedLlm).toBeDefined();
+    await expect(receivedLlm!([{ role: 'user', content: 'ping' }])).resolves.toBe('{}');
+    expect(stubCalls).toBe(1);
   });
 
   it('prod + OPENROUTER_API_KEY builds the prod-only closure without network', () => {
@@ -208,7 +273,7 @@ describe('chart-regen pre-step — failure = label-only fallback (ADR 0003 P2)',
   it('unsupported struct → pngPath null and NO png file written', () => {
     const dir = path.dirname(makeOutPath());
     const assets = regenCharts([UNSUPPORTED_CHART], dir);
-    expect(assets).toEqual([{ snapshot: 0, pngPath: null }]);
+    expect(assets).toEqual([{ figureId: null, snapshot: 0, pngPath: null }]);
     expect(fs.existsSync(path.join(dir, 'chart_0.png'))).toBe(false);
   });
 
@@ -224,7 +289,7 @@ describe('chart-regen pre-step — failure = label-only fallback (ADR 0003 P2)',
       },
     };
     const assets = regenCharts([supported], dir, '/nonexistent/python-bin');
-    expect(assets).toEqual([{ snapshot: 1, pngPath: null }]);
+    expect(assets).toEqual([{ figureId: null, snapshot: 1, pngPath: null }]);
   });
 
   it('integrated path: resources reach orchestrate UNMODIFIED and raw-frame-free', async () => {
@@ -241,9 +306,11 @@ describe('chart-regen pre-step — failure = label-only fallback (ADR 0003 P2)',
       orchestrateImpl: impl,
     });
 
-    // Regen failed (unsupported struct) → label-only; orchestrate still got
-    // the ORIGINAL bundle object — no png/raw-frame substitution happened.
-    expect(result.chartAssets).toEqual([{ snapshot: 0, pngPath: null }]);
+    // Regen failed (unsupported struct) → the CHART asset is label-only;
+    // orchestrate still got the ORIGINAL bundle object — no png/raw-frame
+    // substitution. (PR-A: a formula asset is also produced from the bundle's
+    // formulas[] — it may render; the chart entry is the label-only contract.)
+    expect(result.chartAssets[0]).toEqual({ figureId: null, snapshot: 0, pngPath: null });
     expect(received).toBe(resources);
 
     // Structural raw-frame ban (extends PR-F2's bundle ban to this path):
@@ -252,5 +319,90 @@ describe('chart-regen pre-step — failure = label-only fallback (ADR 0003 P2)',
     for (const banned of ['.png', '.jpg', '.jpeg', 'data:image', 'png_path', 'png_url']) {
       expect(serialized).not.toContain(banned);
     }
+  });
+});
+
+describe('builder-crash retry (vendored-loop escape — PR-H2 live finding)', () => {
+  const RESOURCES = {
+    title: 't',
+    transcript: '',
+    segments: [],
+    figureLabels: [],
+    formulas: [],
+    charts: [],
+  };
+
+  it('retries ONE fresh conversation after a builder crash, reports crashedAttempts', async () => {
+    let calls = 0;
+    const orchestrateImpl = (async () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError('stats.slice is not a function');
+      return { ok: true, type: 'lecture', attempts: 2, out: '/tmp/deck.pptx' };
+    }) as unknown as Parameters<typeof runOrchestrate>[3]['orchestrateImpl'];
+
+    const result = await runOrchestrate(
+      RESOURCES,
+      '/tmp/slidegen-test-crash/deck.pptx',
+      { SLIDEGEN_MODE: 'dev' },
+      { llm: async () => '[]', orchestrateImpl }
+    );
+    expect(result.ok).toBe(true);
+    expect(result.crashedAttempts).toBe(1);
+    expect(calls).toBe(2);
+  });
+
+  it('rethrows after the retry budget is exhausted', async () => {
+    const orchestrateImpl = (async () => {
+      throw new TypeError('stats.slice is not a function');
+    }) as unknown as Parameters<typeof runOrchestrate>[3]['orchestrateImpl'];
+
+    await expect(
+      runOrchestrate(
+        RESOURCES,
+        '/tmp/slidegen-test-crash/deck.pptx',
+        { SLIDEGEN_MODE: 'dev' },
+        { llm: async () => '[]', orchestrateImpl }
+      )
+    ).rejects.toThrow('stats.slice');
+  });
+});
+
+describe('normalizeDeckContent — deterministic stat-shape repair (PR-H2)', () => {
+  it('object-map metrics → [{label, value}] array', () => {
+    const raw = JSON.stringify({ title: 't', metrics: { 다운로드: '300만', 별점: 4.8 } });
+    const out = JSON.parse(normalizeDeckContent(raw)) as { metrics: unknown };
+    expect(out.metrics).toEqual([
+      { label: '다운로드', value: '300만' },
+      { label: '별점', value: '4.8' },
+    ]);
+  });
+
+  it('string entries inside a metrics array → {value, label} objects', () => {
+    const raw = JSON.stringify({ metrics: ['300만 다운로드', { value: 4.8, label: '별점' }] });
+    const out = JSON.parse(normalizeDeckContent(raw)) as { metrics: unknown };
+    expect(out.metrics).toEqual([
+      { value: '300만 다운로드', label: '' },
+      { value: '4.8', label: '별점' },
+    ]);
+  });
+
+  it('bare-string scores are dropped, valid arrays untouched, non-JSON passes through', () => {
+    const dropped = JSON.parse(
+      normalizeDeckContent(JSON.stringify({ scores: 'high' }))
+    ) as Record<string, unknown>;
+    expect(dropped).not.toHaveProperty('scores');
+
+    const valid = JSON.stringify({ metrics: [{ value: '1', label: 'a' }] });
+    expect(normalizeDeckContent(valid)).toBe(valid);
+
+    expect(normalizeDeckContent('not json at all')).toBe('not json at all');
+    const routing = JSON.stringify({ type: 'explainer' });
+    expect(normalizeDeckContent(routing)).toBe(routing);
+  });
+
+  it('repairs fenced JSON replies too', () => {
+    const raw = '```json\n{"metrics": {"속도": "3배"}}\n```';
+    const out = JSON.parse(normalizeDeckContent(raw)) as { metrics: unknown };
+    expect(out.metrics).toEqual([{ label: '속도', value: '3배' }]);
   });
 });

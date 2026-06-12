@@ -105,8 +105,16 @@ def test_formulas_carry_latex_conf_t_and_flag():
     bundle = make_bundle()
     assert bundle["formulas"] == [
         # t=64 is nearest to the second selected frame (ts=65.0) → snapshot 1.
-        {"snapshot": 1, "latex": "E = mc^2", "conf": 0.95, "t": 64, "verification_status": "pending"},
         {
+            "figure_id": "fig0001",
+            "snapshot": 1,
+            "latex": "E = mc^2",
+            "conf": 0.95,
+            "t": 64,
+            "verification_status": "pending",
+        },
+        {
+            "figure_id": "fig0001",
             "snapshot": 1,
             "latex": "\\sum_i x_i",
             "conf": 0.4,
@@ -120,6 +128,7 @@ def test_charts_carry_struct_data():
     bundle = make_bundle()
     assert bundle["charts"] == [
         {
+            "figure_id": "fig0001",
             "snapshot": 0,
             "kind": "chart",
             "struct": {"chart_type": "line", "series": []},

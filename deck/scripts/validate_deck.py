@@ -52,6 +52,10 @@ def main():
         print("usage: validate_deck.py deck.pptx [--min-slides 12] [--lenient]"); sys.exit(2)
     path = args[1]
     min_slides = int(args[args.index("--min-slides")+1]) if "--min-slides" in args else 12
+    # PR-A §1d figure gate: when the source had renderable figures, the deck
+    # MUST embed at least this many images, else PASS would be blind to the
+    # placement gap (a chart-heavy video rendering 0 figures used to PASS).
+    require_figures = int(args[args.index("--require-figures")+1]) if "--require-figures" in args else 0
     lenient = "--lenient" in args
     z = zipfile.ZipFile(path); sl = slides(z)
     problems, soft, notes, charlist = [], [], [], []
@@ -83,6 +87,12 @@ def main():
 
     body_all = "".join(z.read(n).decode("utf-8", "ignore") for n in sl)
     media = [n for n in z.namelist() if n.startswith("ppt/media/")]
+    # §1d figure gate — count embedded raster figures (ppt/media images).
+    img_media = [n for n in media if re.search(r"\.(png|jpg|jpeg|gif|emf)$", n, re.I)]
+    if require_figures > 0 and len(img_media) < require_figures:
+        problems.append(
+            f"[figure 미배치] 임베드 이미지 {len(img_media)} < 요구 {require_figures} — "
+            f"CV가 재렌더한 figure가 덱에 배치되지 않음(placement 갭)")
     has_chart = any(re.match(r'ppt/charts/chart\d+\.xml$', n) for n in z.namelist())
     cc = charlist[1:] if len(charlist) > 1 else charlist
     if cc: notes.append(f"본문 글자수/장표: 최소 {min(cc)} ~ 최대 {max(cc)} (균일할수록 좋음)")

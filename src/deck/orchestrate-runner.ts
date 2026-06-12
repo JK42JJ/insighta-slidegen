@@ -43,15 +43,27 @@ export interface OrchestrateResources {
   transcript: string;
   segments: unknown[];
   figureLabels: unknown[];
-  formulas: unknown[];
+  formulas: FormulaResource[];
   charts: ChartResource[];
 }
 
 /** One mode-B chart entry of the resources bundle (bundle.py shape). */
 export interface ChartResource {
+  /** PR-A: stable key matching the regenerated asset to the LLM's figureRef. */
+  figure_id?: string;
   snapshot?: number | null;
   kind: string;
   struct: unknown;
+  conf?: number;
+  t?: number;
+  verification_status?: string;
+}
+
+/** One mode-C formula entry (bundle.py shape — LaTeX, no struct). */
+export interface FormulaResource {
+  figure_id?: string;
+  snapshot?: number | null;
+  latex: string;
   conf?: number;
   t?: number;
   verification_status?: string;
@@ -86,17 +98,113 @@ export type OrchestrateFn = (
     minSlides: number;
     link?: string;
     classify?: ClassifyFn;
+    /** PR-A §1b: {figure_id → regenerated PNG path} the recipe places by ref. */
+    figureAssets?: Record<string, string>;
   }
 ) => Promise<OrchestrateOutcome>;
 
 /** Chart-regen pre-step result: pngPath=null means LABEL-ONLY fallback. */
 export interface ChartAsset {
+  /** figure_id key (PR-A) — links this asset to the LLM's figureRef. */
+  figureId: string | null;
   snapshot: number | null;
   pngPath: string | null;
 }
 
 export interface RunnerResult extends OrchestrateOutcome {
   chartAssets: ChartAsset[];
+  /**
+   * orchestrate() calls that died on a BUILDER crash (template render on
+   * malformed LLM content) and were retried with a fresh conversation. The
+   * vendored loop feeds back JSON-parse failures but lets builder exceptions
+   * escape — and deck/ is byte-stable (ADR 0003 D7), so the retry lives
+   * HERE. Each crash consumed ≥1 LLM content attempt (counted as 1 for G2).
+   */
+  crashedAttempts: number;
+}
+
+/** Fresh-conversation retries after a builder crash (vendored-loop escape). */
+const BUILD_CRASH_RETRIES = 1;
+
+// ── Deterministic content normalization (PR-H2 live finding) ─────────────────
+// Sonnet repeatedly emits `metrics`/`scores` as an OBJECT MAP (or strings)
+// where the vendored kpis template requires [{value, unit?, label}] — and a
+// builder crash escapes the vendored feedback loop. The harness normalizes
+// the LLM text BEFORE the vendored parser sees it (deck/ stays byte-stable,
+// ADR 0003 D7). Faithful transforms only — nothing is invented.
+
+/** Recipe keys the kpis template renders as stat arrays. */
+const STAT_ARRAY_KEYS = ['metrics', 'scores'] as const;
+
+function coerceStatEntry(entry: unknown): Record<string, unknown> | null {
+  if (typeof entry === 'string') return { value: entry, label: '' };
+  if (typeof entry === 'number') return { value: String(entry), label: '' };
+  if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
+    const record = entry as Record<string, unknown>;
+    if (record['value'] !== undefined) {
+      return { ...record, value: String(record['value']) };
+    }
+    // {label: value}-shaped single pair → one stat
+    const pairs = Object.entries(record);
+    if (pairs.length === 1 && typeof pairs[0]![1] !== 'object') {
+      return { label: pairs[0]![0], value: String(pairs[0]![1]) };
+    }
+  }
+  return null;
+}
+
+/** Normalize fragile stat fields of a content JSON; non-JSON passes through. */
+export function normalizeDeckContent(raw: string): string {
+  const candidates = [raw.trim()];
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(raw);
+  if (fenced?.[1]) candidates.push(fenced[1].trim());
+  const first = raw.indexOf('{');
+  const last = raw.lastIndexOf('}');
+  if (first >= 0 && last > first) candidates.push(raw.slice(first, last + 1));
+
+  for (const candidate of candidates) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return raw;
+    const content = parsed as Record<string, unknown>;
+    let changed = false;
+    for (const key of STAT_ARRAY_KEYS) {
+      const value = content[key];
+      if (value === undefined || value === null) continue;
+      if (Array.isArray(value)) {
+        const coerced = value.map(coerceStatEntry).filter((v) => v !== null);
+        if (coerced.length !== value.length || coerced.some((v, i) => v !== value[i])) {
+          if (coerced.length > 0) content[key] = coerced;
+          else delete content[key];
+          changed = true;
+        }
+        continue;
+      }
+      if (typeof value === 'object') {
+        // object map {label: value, ...} → [{label, value}]
+        content[key] = Object.entries(value as Record<string, unknown>)
+          .filter(([, v]) => typeof v !== 'object')
+          .map(([label, v]) => ({ label, value: String(v) }));
+        changed = true;
+        continue;
+      }
+      // bare string/number — not renderable as a stat row
+      delete content[key];
+      changed = true;
+    }
+    return changed ? JSON.stringify(content) : raw;
+  }
+  return raw;
+}
+
+/** Wrap an llm so every reply passes the deterministic normalizer. */
+function withContentNormalizer(llm: LlmFn): LlmFn {
+  return async (messages: LlmMessage[]): Promise<string> =>
+    normalizeDeckContent(await llm(messages));
 }
 
 export interface RunnerOptions {
@@ -162,22 +270,43 @@ function openRouterLlm(apiKey: string, model: string = DEFAULT_OPENROUTER_MODEL)
 export function regenCharts(
   charts: ChartResource[],
   artifactsDir: string,
-  pythonBin: string = DEFAULT_PYTHON_BIN
+  pythonBin: string = DEFAULT_PYTHON_BIN,
+  formulas: FormulaResource[] = []
 ): ChartAsset[] {
-  return charts.map((chart, index) => {
-    const outPng = path.join(artifactsDir, `chart_${index}.png`);
+  const py = path.join(findRepoRoot(), 'py');
+  const run = (job: object, outPng: string): string | null => {
     try {
       const stdout = execFileSync(pythonBin, ['-m', 'deck_tools.chart_regen'], {
-        cwd: path.join(findRepoRoot(), 'py'),
-        input: JSON.stringify({ struct: chart.struct, out: outPng }),
+        cwd: py,
+        input: JSON.stringify({ ...job, out: outPng }),
         encoding: 'utf8',
       });
-      const parsed = JSON.parse(stdout) as { png: string | null };
-      return { snapshot: chart.snapshot ?? null, pngPath: parsed.png };
+      return (JSON.parse(stdout) as { png: string | null }).png;
     } catch {
-      return { snapshot: chart.snapshot ?? null, pngPath: null };
+      return null;
     }
-  });
+  };
+  const chartAssets = charts.map((chart, index) => ({
+    figureId: chart.figure_id ?? null,
+    snapshot: chart.snapshot ?? null,
+    pngPath: run({ struct: chart.struct }, path.join(artifactsDir, `chart_${index}.png`)),
+  }));
+  // §1b: equations render too (mode C → mathtext PNG), same figure_id keying.
+  const formulaAssets = formulas.map((formula, index) => ({
+    figureId: formula.figure_id ?? null,
+    snapshot: formula.snapshot ?? null,
+    pngPath: run({ kind: 'equation', latex: formula.latex }, path.join(artifactsDir, `eq_${index}.png`)),
+  }));
+  return [...chartAssets, ...formulaAssets];
+}
+
+/** {figure_id → pngPath} for assets that rendered (PR-A §1b placement map). */
+export function buildFigureAssets(assets: ChartAsset[]): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const a of assets) {
+    if (a.figureId && a.pngPath) map[a.figureId] = a.pngPath;
+  }
+  return map;
 }
 
 /**
@@ -191,25 +320,39 @@ export async function runOrchestrate(
   options: RunnerOptions = {}
 ): Promise<RunnerResult> {
   // 1. llm FIRST — the refusal path must trigger before any vendored code.
-  const llm = buildLlm(config, options.llm);
+  //    Every reply passes the deterministic stat-shape normalizer.
+  const llm = withContentNormalizer(buildLlm(config, options.llm));
 
-  // 2. chart-regen pre-step (failure → label-only, never raw frames).
+  // 2. chart+equation regen pre-step (failure → label-only, never raw frames).
   const chartAssets = regenCharts(
     resources.charts ?? [],
     path.dirname(outPath),
-    options.pythonBin
+    options.pythonBin,
+    resources.formulas ?? []
   );
+  const figureAssets = buildFigureAssets(chartAssets);
 
-  // 3. vendored self-correction loop, llm explicitly injected.
+  // 3. vendored self-correction loop, llm explicitly injected. A builder
+  //    crash escapes the vendored loop (only JSON-parse failures feed back),
+  //    so it is retried here with a fresh conversation.
   const orchestrate = options.orchestrateImpl ?? loadVendoredOrchestrate();
-  const outcome = await orchestrate(resources, outPath, {
+  const orchestrateOpts = {
     llm,
     minSlides: options.minSlides ?? DEFAULT_MIN_SLIDES,
+    figureAssets, // §1b: recipe places by figure_id; empty map = all label-only
     ...(options.link !== undefined ? { link: options.link } : {}),
     ...(options.classify !== undefined ? { classify: options.classify } : {}),
-  });
-
-  return { ...outcome, chartAssets };
+  };
+  let crashedAttempts = 0;
+  for (;;) {
+    try {
+      const outcome = await orchestrate(resources, outPath, orchestrateOpts);
+      return { ...outcome, chartAssets, crashedAttempts };
+    } catch (err) {
+      crashedAttempts += 1;
+      if (crashedAttempts > BUILD_CRASH_RETRIES) throw err;
+    }
+  }
 }
 
 /** Absolute path of deck/scripts/orchestrate.js, found from the repo root. */
