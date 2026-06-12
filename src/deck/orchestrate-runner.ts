@@ -43,15 +43,27 @@ export interface OrchestrateResources {
   transcript: string;
   segments: unknown[];
   figureLabels: unknown[];
-  formulas: unknown[];
+  formulas: FormulaResource[];
   charts: ChartResource[];
 }
 
 /** One mode-B chart entry of the resources bundle (bundle.py shape). */
 export interface ChartResource {
+  /** PR-A: stable key matching the regenerated asset to the LLM's figureRef. */
+  figure_id?: string;
   snapshot?: number | null;
   kind: string;
   struct: unknown;
+  conf?: number;
+  t?: number;
+  verification_status?: string;
+}
+
+/** One mode-C formula entry (bundle.py shape — LaTeX, no struct). */
+export interface FormulaResource {
+  figure_id?: string;
+  snapshot?: number | null;
+  latex: string;
   conf?: number;
   t?: number;
   verification_status?: string;
@@ -86,11 +98,15 @@ export type OrchestrateFn = (
     minSlides: number;
     link?: string;
     classify?: ClassifyFn;
+    /** PR-A §1b: {figure_id → regenerated PNG path} the recipe places by ref. */
+    figureAssets?: Record<string, string>;
   }
 ) => Promise<OrchestrateOutcome>;
 
 /** Chart-regen pre-step result: pngPath=null means LABEL-ONLY fallback. */
 export interface ChartAsset {
+  /** figure_id key (PR-A) — links this asset to the LLM's figureRef. */
+  figureId: string | null;
   snapshot: number | null;
   pngPath: string | null;
 }
@@ -254,22 +270,43 @@ function openRouterLlm(apiKey: string, model: string = DEFAULT_OPENROUTER_MODEL)
 export function regenCharts(
   charts: ChartResource[],
   artifactsDir: string,
-  pythonBin: string = DEFAULT_PYTHON_BIN
+  pythonBin: string = DEFAULT_PYTHON_BIN,
+  formulas: FormulaResource[] = []
 ): ChartAsset[] {
-  return charts.map((chart, index) => {
-    const outPng = path.join(artifactsDir, `chart_${index}.png`);
+  const py = path.join(findRepoRoot(), 'py');
+  const run = (job: object, outPng: string): string | null => {
     try {
       const stdout = execFileSync(pythonBin, ['-m', 'deck_tools.chart_regen'], {
-        cwd: path.join(findRepoRoot(), 'py'),
-        input: JSON.stringify({ struct: chart.struct, out: outPng }),
+        cwd: py,
+        input: JSON.stringify({ ...job, out: outPng }),
         encoding: 'utf8',
       });
-      const parsed = JSON.parse(stdout) as { png: string | null };
-      return { snapshot: chart.snapshot ?? null, pngPath: parsed.png };
+      return (JSON.parse(stdout) as { png: string | null }).png;
     } catch {
-      return { snapshot: chart.snapshot ?? null, pngPath: null };
+      return null;
     }
-  });
+  };
+  const chartAssets = charts.map((chart, index) => ({
+    figureId: chart.figure_id ?? null,
+    snapshot: chart.snapshot ?? null,
+    pngPath: run({ struct: chart.struct }, path.join(artifactsDir, `chart_${index}.png`)),
+  }));
+  // §1b: equations render too (mode C → mathtext PNG), same figure_id keying.
+  const formulaAssets = formulas.map((formula, index) => ({
+    figureId: formula.figure_id ?? null,
+    snapshot: formula.snapshot ?? null,
+    pngPath: run({ kind: 'equation', latex: formula.latex }, path.join(artifactsDir, `eq_${index}.png`)),
+  }));
+  return [...chartAssets, ...formulaAssets];
+}
+
+/** {figure_id → pngPath} for assets that rendered (PR-A §1b placement map). */
+export function buildFigureAssets(assets: ChartAsset[]): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const a of assets) {
+    if (a.figureId && a.pngPath) map[a.figureId] = a.pngPath;
+  }
+  return map;
 }
 
 /**
@@ -286,12 +323,14 @@ export async function runOrchestrate(
   //    Every reply passes the deterministic stat-shape normalizer.
   const llm = withContentNormalizer(buildLlm(config, options.llm));
 
-  // 2. chart-regen pre-step (failure → label-only, never raw frames).
+  // 2. chart+equation regen pre-step (failure → label-only, never raw frames).
   const chartAssets = regenCharts(
     resources.charts ?? [],
     path.dirname(outPath),
-    options.pythonBin
+    options.pythonBin,
+    resources.formulas ?? []
   );
+  const figureAssets = buildFigureAssets(chartAssets);
 
   // 3. vendored self-correction loop, llm explicitly injected. A builder
   //    crash escapes the vendored loop (only JSON-parse failures feed back),
@@ -300,6 +339,7 @@ export async function runOrchestrate(
   const orchestrateOpts = {
     llm,
     minSlides: options.minSlides ?? DEFAULT_MIN_SLIDES,
+    figureAssets, // §1b: recipe places by figure_id; empty map = all label-only
     ...(options.link !== undefined ? { link: options.link } : {}),
     ...(options.classify !== undefined ? { classify: options.classify } : {}),
   };

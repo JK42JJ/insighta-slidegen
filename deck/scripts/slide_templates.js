@@ -258,6 +258,16 @@ function makeSlides(D, opts = {}) {
       footer(s, page, total); return s;
     },
 
+    /* 14. 재생성 figure (PR-A) — CV가 수치화→재렌더한 PNG를 본문 폭으로 배치.
+       원본 스크린샷이 아니라 chart_regen/equation 렌더 결과만 들어온다(ADR 0003 P2). */
+    figureSlide({ kicker = "Figure", title, cat = "blue", img, caption }) {
+      page++; const s = newSlide(); header(s, { kicker, title, cat });
+      const y = 1.62, h = 4.4;
+      s.addImage({ path: img, x: MX, y, w: CW, h, sizing: { type: "contain", w: CW, h } });
+      if (caption) s.addText(caption, { x: MX, y: y + h + 0.12, w: CW, h: 0.4, align: "center", fontFace: BRAND.font.body, fontSize: 11.5, italic: true, color: BRAND.muted, margin: 0 });
+      footer(s, page, total); return s;
+    },
+
     save(fileName) { return pres.writeFile({ fileName }); },
     get page() { return page; },
   };

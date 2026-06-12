@@ -199,4 +199,7 @@ figure_id를 붙일지 선택 + 캡션 작성만.
 - **D7 정리: deck/를 정식 first-party로 편입하거나 upstream 레포 신설**
   (이 PR의 D7 1회성 예외를 영구화하지 않기 위함 — James 조건)
 - CV 서비스 단계 트리의 로컬 pull 자동화 (현 ops scp)
-- diagram struct 추출 → Graphviz figlib/figdense 배치 (PR-A에서 label-only로 연기)
+- **diagram/table struct 렌더러 (Graphviz figlib/figdense 차용) — 우선순위 근거:
+  V02 실측 numerize 16건 중 13건(diagram 12·table 2 — chart 3만 렌더 가능)이
+  렌더러 부재로 label-only. 즉 현 chart_regen 커버리지 3/16(19%). diagram struct
+  추출 + figlib 배치로 이 13건을 덱에 올리는 것이 figure 충실도의 최대 레버.**

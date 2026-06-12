@@ -175,14 +175,42 @@ function planFor(type, content) {
   return fn(content);
 }
 
+/* PR-A: place regenerated figures the LLM referenced.
+ * content.figures = [{figure_id, kind, title?, caption?}] — figure_id keys into
+ * opts.figureAssets ({figure_id → local PNG path}, built from chart_regen /
+ * equation render). Only figures whose asset RESOLVED get a slide; an absent
+ * asset is silently skipped (label-only — never a raw frame, ADR 0003 P2).
+ * Returns the count placed (feeds the validate figure gate, §1d). */
+function injectFigureSlides(plan, content, figureAssets) {
+  const refs = Array.isArray(content.figures) ? content.figures : [];
+  if (!refs.length || !figureAssets) return 0;
+  const SEC = ["blue", "emerald", "violet", "amber", "rose", "slate"];
+  const figurePlan = [];
+  refs.forEach((ref, i) => {
+    const img = ref && ref.figure_id ? figureAssets[ref.figure_id] : null;
+    if (!img) return; // unresolved → label-only (no slide)
+    figurePlan.push(["figureSlide", {
+      kicker: "Figure", title: ref.title || ref.caption || "그림",
+      cat: SEC[i % SEC.length], img, caption: ref.caption || "",
+    }]);
+  });
+  if (!figurePlan.length) return 0;
+  // Insert before the closing slide (last plan entry) so figures sit in-body.
+  const insertAt = Math.max(0, plan.length - 1);
+  plan.splice(insertAt, 0, ...figurePlan);
+  return figurePlan.length;
+}
+
 async function buildRecipe(type, content, outPath, opts = {}) {
   const warn = checkContent(type, content);
   if (warn.length && !opts.silent) warn.forEach((w) => console.warn("⚠ 밀도:", w));
   const plan = planFor(type, content);
+  const placed = injectFigureSlides(plan, content, opts.figureAssets);
+  if (placed && !opts.silent) console.warn("figures placed:", placed);
   const D = createDeck({ title: content.title || type });
   const S = makeSlides(D, { total: plan.length, link: opts.link || "https://insighta.one" });
   for (const [method, args] of plan) S[method](args);
   return S.save(outPath);
 }
 
-module.exports = { buildRecipe, planFor, checkContent, buildExplainerPlan, PLANS, RECIPE_TYPES: ["explainer", ...Object.keys(PLANS)] };
+module.exports = { buildRecipe, planFor, checkContent, buildExplainerPlan, injectFigureSlides, PLANS, RECIPE_TYPES: ["explainer", ...Object.keys(PLANS)] };
