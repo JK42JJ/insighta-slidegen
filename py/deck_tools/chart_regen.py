@@ -155,8 +155,9 @@ def regenerate_chart(struct: dict, out_path: str | os.PathLike) -> str | None:
             ax.set_xlabel(str(axes["x"]), fontsize=10, color=INK)
         if axes.get("y"):
             ax.set_ylabel(str(axes["y"]), fontsize=10, color=INK)
-        if struct.get("insight"):
-            ax.set_title(str(struct["insight"]), fontsize=10.5, color=INK, pad=8)
+        # A2: the insight/title is NOT baked into the PNG — the slide template
+        # renders it as editable text (figureSlide title + caption). Only the
+        # plot area (+ data-essential axis labels) belongs in the raster.
         if any(name for name, _xs, _ys in series):
             ax.legend(frameon=False, fontsize=9)
 
@@ -259,8 +260,7 @@ def _regenerate_bar_broken(
             ax_bot.set_ylabel(str(axes["y"]), fontsize=10, color=INK)
         if axes.get("x"):
             ax_bot.set_xlabel(str(axes["x"]), fontsize=10, color=INK)
-        if struct.get("insight"):
-            ax_top.set_title(str(struct["insight"]), fontsize=10.5, color=INK, pad=8)
+        # A2: insight/title rendered as editable slide text, not baked here.
         plt.tight_layout(pad=0.4)
         fig.savefig(out_path, transparent=True, bbox_inches="tight", dpi=FIGURE_DPI)
     finally:

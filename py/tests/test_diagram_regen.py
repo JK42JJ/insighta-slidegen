@@ -52,6 +52,41 @@ def test_table_struct_renders(tmp_path):
     assert diagram_regen.regenerate_diagram(TABLE, out) == str(out)
 
 
+@dot_required
+def test_font_scale_enlarges_the_render(tmp_path):
+    """A3: font_scale multiplies font sizes so the node deck runner can lift a
+    scaled-down diagram's on-slide font. A larger font_scale must produce a
+    visibly larger graph (font → node size → graph extent)."""
+    from struct import unpack
+
+    def width(p):
+        with open(p, "rb") as f:
+            return unpack(">II", f.read(24)[16:24])[0]
+
+    p1 = diagram_regen.regenerate_diagram(FLOW, tmp_path / "f1.png", font_scale=1.0)
+    p2 = diagram_regen.regenerate_diagram(FLOW, tmp_path / "f2.png", font_scale=2.0)
+    assert p1 and p2
+    assert width(p2) > width(p1)  # bigger font ⇒ bigger render
+
+
+@dot_required
+def test_insight_is_not_drawn_on_the_graph(tmp_path):
+    """A2: the insight/title must NOT change the render (it's editable slide
+    text now, not baked in) — a struct with vs without `insight` is identical."""
+    from struct import unpack
+
+    def size(p):
+        with open(p, "rb") as f:
+            return unpack(">II", f.read(24)[16:24])
+
+    with_insight = {**FLOW, "insight": "이 다이어그램은 RAG 파이프라인을 보여준다"}
+    without = {k: v for k, v in FLOW.items() if k != "insight"}
+    p1 = diagram_regen.regenerate_diagram(with_insight, tmp_path / "wi.png")
+    p2 = diagram_regen.regenerate_diagram(without, tmp_path / "wo.png")
+    assert p1 and p2
+    assert size(p1) == size(p2)  # insight changes nothing in the raster
+
+
 def test_unsupported_diagram_type_returns_none(tmp_path):
     bad_type = {"diagram_type": "mindmap_3d", "nodes": [{"id": "a"}]}
     assert diagram_regen.regenerate_diagram(bad_type, tmp_path / "x.png") is None

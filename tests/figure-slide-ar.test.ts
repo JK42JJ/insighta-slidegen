@@ -60,18 +60,33 @@ describe('figureSlide _fitContain — aspect-ratio preservation', () => {
     expect(box.h).toBeLessThanOrEqual(SLOT.h + 1e-9);
   });
 
-  it('width-bound figure fills the width and centers vertically', () => {
-    const box = _fitContain(png(2086, 718), SLOT.x, SLOT.y, SLOT.w, SLOT.h);
+  it('width-bound figure (under the scale-up cap) fills the width and centers vertically', () => {
+    // native 8in wide → scale 12.09/8 = 1.51× < 1.6 cap, so it fills the width.
+    const box = _fitContain(png(2400, 800), SLOT.x, SLOT.y, SLOT.w, SLOT.h);
     expect(box.w).toBeCloseTo(SLOT.w, 5);
     expect(box.y).toBeGreaterThan(SLOT.y); // letterboxed (centered) in the slot
-    expect(arOf(box)).toBeCloseTo(2086 / 718, 1);
+    expect(arOf(box)).toBeCloseTo(2400 / 800, 1);
   });
 
-  it('tall figure is height-bound and centers horizontally', () => {
-    const box = _fitContain(png(400, 800), SLOT.x, SLOT.y, SLOT.w, SLOT.h);
+  it('tall figure (under the cap) is height-bound and centers horizontally', () => {
+    // native 3.33in tall → scale 4.7/3.33 = 1.41× < 1.6 cap, so it fills height.
+    const box = _fitContain(png(450, 1000), SLOT.x, SLOT.y, SLOT.w, SLOT.h);
     expect(box.h).toBeCloseTo(SLOT.h, 5);
     expect(box.x).toBeGreaterThan(SLOT.x);
-    expect(arOf(box)).toBeCloseTo(0.5, 2);
+    expect(arOf(box)).toBeCloseTo(0.45, 2);
+  });
+
+  it('A3: a small figure is NOT enlarged past 1.6× native (font upper bound)', () => {
+    // native 3×2in → would scale ~2.35× to fill the slot; capped to 1.6×.
+    const W = 900,
+      H = 600;
+    const box = _fitContain(png(W, H), SLOT.x, SLOT.y, SLOT.w, SLOT.h);
+    const scale = box.w / (W / 300);
+    expect(scale).toBeLessThanOrEqual(1.6 + 1e-9);
+    expect(scale).toBeCloseTo(1.6, 2); // hit the cap, not the slot
+    expect(arOf(box)).toBeCloseTo(W / H, 2); // AR still preserved
+    expect(box.x).toBeGreaterThan(SLOT.x); // centered (letterbox both axes)
+    expect(box.y).toBeGreaterThan(SLOT.y);
   });
 
   it('falls back to filling the slot when the size is unreadable', () => {

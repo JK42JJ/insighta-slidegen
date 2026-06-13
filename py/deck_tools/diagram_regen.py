@@ -28,7 +28,6 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
 
 # ── Insighta brand palette (deck/scripts/figures.py parity) ──────────────────
 FONT = "NanumGothic"
@@ -85,9 +84,14 @@ def _have_dot() -> bool:
     return shutil.which("dot") is not None
 
 
-def regenerate_diagram(struct: dict, out_path: str | os.PathLike) -> str | None:
+def regenerate_diagram(
+    struct: dict, out_path: str | os.PathLike, font_scale: float = 1.0
+) -> str | None:
     """Render a diagram/table struct to a PNG. None when unrenderable
-    (caller falls back to label-only — never a raw frame, ADR 0003 P2)."""
+    (caller falls back to label-only — never a raw frame, ADR 0003 P2).
+
+    A3: font_scale multiplies all font sizes so the node deck runner can keep
+    the on-slide font legible at the figure's final placed size."""
     if not isinstance(struct, dict) or not _have_dot():
         return None
     install_korean_font()
@@ -106,9 +110,7 @@ def regenerate_diagram(struct: dict, out_path: str | os.PathLike) -> str | None:
         nodes = struct.get("nodes") or []
         if not _nodes_edges_consistent(nodes, struct.get("edges") or []):
             return None
-        g = _render_diagram(
-            graphviz, dtype, nodes, struct.get("edges") or [], struct.get("insight")
-        )
+        g = _render_diagram(graphviz, dtype, nodes, struct.get("edges") or [], font_scale)
     if g is None:
         return None
 
@@ -144,22 +146,25 @@ def _nodes_edges_consistent(nodes: list, edges: list) -> bool:
     return True
 
 
-def _base(graphviz, name: str, rankdir: str = "TB"):
+def _base(graphviz, name: str, rankdir: str = "TB", font_scale: float = 1.0):
     g = graphviz.Digraph(name, format="png")
     g.attr(rankdir=rankdir, bgcolor="white", fontname=FONT, pad="0.3",
            nodesep="0.4", ranksep="0.5", dpi=str(FIGURE_DPI))
     g.attr("node", shape="box", style="rounded,filled", fontname=FONT,
-           fontsize="11", margin="0.18,0.12", penwidth="1.6", color=INK)
-    g.attr("edge", fontname=FONT, fontsize="9", color="#334155", penwidth="1.6")
+           fontsize=str(round(11 * font_scale, 1)), margin="0.18,0.12",
+           penwidth="1.6", color=INK)
+    g.attr("edge", fontname=FONT, fontsize=str(round(9 * font_scale, 1)),
+           color="#334155", penwidth="1.6")
     return g
 
 
-def _render_diagram(graphviz, dtype: str, nodes: list, edges: list, insight: Any):
+def _render_diagram(graphviz, dtype: str, nodes: list, edges: list, font_scale: float = 1.0):
     # flow / swimlane lay left→right; tree / layered top→bottom; matrix grid.
+    # A2: the insight/title is NOT drawn on the graph — the slide template
+    # renders it as editable text (figureSlide title + caption). Only the
+    # diagram itself belongs in the raster.
     rankdir = "LR" if dtype in ("flow", "swimlane") else "TB"
-    g = _base(graphviz, dtype, rankdir=rankdir)
-    if insight:
-        g.attr(label=str(insight) + "\n", labelloc="t", fontsize="13", fontname=FONT)
+    g = _base(graphviz, dtype, rankdir=rankdir, font_scale=font_scale)
     # group → cluster (layered/swimlane); ungrouped → flat.
     groups: dict[str, list] = {}
     for i, n in enumerate(nodes):
@@ -170,7 +175,8 @@ def _render_diagram(graphviz, dtype: str, nodes: list, edges: list, insight: Any
         if gid:
             with g.subgraph(name=f"cluster_{ci}") as c:
                 c.attr(label=gid, style="rounded,dashed", color=ec, fontcolor=ec,
-                       fontname=FONT, fontsize="12", margin="12", labelloc="b")
+                       fontname=FONT, fontsize=str(round(12 * font_scale, 1)),
+                       margin="12", labelloc="b")
                 for i, n in members:
                     c.node(str(n["id"]), str(n.get("label", n["id"])),
                            color=ec, fillcolor=fc, fontcolor=INK)
@@ -235,13 +241,16 @@ def _has_enough_ink(out_path: str | os.PathLike) -> bool:
 
 def main() -> int:
     """CLI for the node deck runner. stdin job:
-        {"struct": <diagram|table struct>, "out": "<png>"}
-    → {"png": "<path>"} or {"png": null} (label-only fallback)."""
+        {"struct": <diagram|table struct>, "out": "<png>", "font_scale": <float>}
+    → {"png": "<path>"} or {"png": null} (label-only fallback). font_scale
+    defaults to 1.0 (A3 — the runner sizes it to the figure's placement)."""
     import json
     import sys
 
     job = json.load(sys.stdin)
-    png = regenerate_diagram(job.get("struct"), job["out"])
+    png = regenerate_diagram(
+        job.get("struct"), job["out"], float(job.get("font_scale", 1.0))
+    )
     json.dump({"png": png}, sys.stdout)
     return 0
 
