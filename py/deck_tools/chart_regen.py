@@ -27,12 +27,48 @@ Bar-chart points may also use the reference {"label": "", "value": 0} form
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402  (backend must be set before pyplot)
+from matplotlib import font_manager  # noqa: E402
+
+# ── Korean glyph support (invariant 8 parity with diagram_regen) ─────────────
+# matplotlib's default DejaVu Sans renders Hangul as □ (the V02 live run showed
+# tofu in chart axis labels). diagram_regen forces NanumGothic for the Graphviz
+# (dot) path; the matplotlib path needs the same guarantee. matplotlib keeps its
+# OWN font cache (not fontconfig), so registering the bundled TTF with the
+# font_manager and setting it as the default family is enough — no fc-cache step
+# (unlike diagram_regen, whose dot binary reads fontconfig). Best-effort: a
+# missing asset degrades to the matplotlib default rather than crashing.
+_KOREAN_FONT_FAMILY = "NanumGothic"
+
+
+def _install_matplotlib_korean_font() -> bool:
+    """Register the bundled NanumGothic with matplotlib and make it the default
+    family so Korean axis labels/titles render. Idempotent; returns True when a
+    Korean-capable family is active."""
+    assets = Path(__file__).parent / "assets"
+    regular = assets / "NanumGothic.ttf"
+    if not regular.exists():
+        return False
+    try:
+        for ttf in (regular, assets / "NanumGothic-Bold.ttf"):
+            if ttf.exists():
+                font_manager.fontManager.addfont(str(ttf))
+        plt.rcParams["font.family"] = _KOREAN_FONT_FAMILY
+        # ASCII hyphen for minus so negative ticks don't render as □ (the
+        # Unicode minus glyph is absent from NanumGothic).
+        plt.rcParams["axes.unicode_minus"] = False
+        return True
+    except Exception:  # noqa: BLE001 — font setup must never block rendering
+        return False
+
+
+_install_matplotlib_korean_font()
 
 # ── Insighta palette (deck/scripts/figures.py — brand constants) ─────────────
 INK = "#0F172A"
