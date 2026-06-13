@@ -75,6 +75,44 @@ def test_sink_is_noop_without_dir(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_sink_persists_source_crops_for_fidelity_3panel(tmp_path):
+    """The crop|struct|render fidelity review needs the SOURCE crops, which were
+    ephemeral before (frames working dir). detect_and_numerize must copy each
+    figure's crop PNG into 02-detect/crops/ (leaf name only). Regression: the
+    V02 after-run could not be 3-panel-reviewed because crops weren't persisted."""
+    src_dir = tmp_path / "work" / "crops"
+    src_dir.mkdir(parents=True)
+    figs = []
+    for i in range(3):
+        p = src_dir / f"keyframe_{i:04d}_crop0.png"
+        p.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes([i]) * 16)  # stand-in crop bytes
+        f = _Fig(f"f{i}", "diagram", bbox={"x": 0, "y": 0, "w": 5, "h": 5},
+                 struct={"diagram_type": "flow", "nodes": [], "edges": []})
+        f.png_path = str(p)
+        figs.append(f)
+
+    sink = StageArtifactSink(tmp_path / "tree", "V02")
+    sink.detect_and_numerize(figs)
+    sink.write_manifest()
+
+    crops = sorted((tmp_path / "tree" / "02-detect" / "crops").glob("*.png"))
+    assert len(crops) == 3
+    assert {c.name for c in crops} == {f"keyframe_{i:04d}_crop0.png" for i in range(3)}
+    assert crops[0].read_bytes().startswith(b"\x89PNG")  # bytes copied intact
+    assert "3 source crops" in (tmp_path / "tree" / "MANIFEST.md").read_text()
+
+
+def test_sink_crop_persist_skips_missing_files(tmp_path):
+    """A figure whose crop file is gone must not abort the dump (best-effort)."""
+    fig = _Fig("f1", "chart", bbox={"x": 0, "y": 0, "w": 1, "h": 1},
+               struct={"chart_type": "line", "series": []})
+    fig.png_path = "/tmp/does-not-exist-crop.png"
+    sink = StageArtifactSink(tmp_path, "V02")
+    sink.detect_and_numerize([fig])  # no crash
+    crops_dir = tmp_path / "02-detect" / "crops"
+    assert not crops_dir.exists() or list(crops_dir.iterdir()) == []
+
+
 def test_sink_strips_video_id_from_frame_and_crop_paths(tmp_path):
     """PUBLIC-repo rule: frame/crop paths live under
     /tmp/slidegen-frames/<youtube_id>/… — only the leaf filename may be
