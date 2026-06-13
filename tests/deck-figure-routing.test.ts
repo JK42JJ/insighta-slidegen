@@ -18,14 +18,23 @@ const { injectFigureSlides } = require('../deck/scripts/deck_recipes.js') as {
   ) => number;
 };
 
-const TABLE = { headers: ['A', 'B'], rows: [['1', '2'], ['3', '4']] };
+const TABLE = {
+  headers: ['A', 'B'],
+  rows: [
+    ['1', '2'],
+    ['3', '4'],
+  ],
+};
 
 function runInject(
   figures: Array<Record<string, unknown>>,
   assets: Record<string, string>,
   tables: Record<string, { headers: unknown[]; rows: unknown[] }>
 ): Array<[string, Record<string, unknown>]> {
-  const plan: Array<[string, Record<string, unknown>]> = [['cover', {}], ['closing', {}]];
+  const plan: Array<[string, Record<string, unknown>]> = [
+    ['cover', {}],
+    ['closing', {}],
+  ];
   injectFigureSlides(plan, { figures }, assets, tables);
   return plan;
 }
