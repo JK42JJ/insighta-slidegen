@@ -33,6 +33,31 @@ FRAME_RATE = 1  # frames per second extracted from video
 # (existing behavior — env default stays a no-op per the config rollback rule).
 ENV_YTDLP_PROXY = "SLIDEGEN_YTDLP_PROXY"
 
+# Acquire resolution cap (yt-dlp `height<=N`). Default 720 = existing behavior
+# (env default stays a no-op per the config rollback rule). Raised to 1080 for
+# the (a) label-fidelity experiment: a small on-screen diagram cropped from a
+# 720p frame is ~216×156px (node labels ~10px → below Qwen's OCR floor); 1080p
+# makes the same crop ~1.5× larger. A config knob (not a hardcode) so 720↔1080
+# is an A/B with no code revert.
+ENV_ACQUIRE_MAX_HEIGHT = "SLIDEGEN_ACQUIRE_MAX_HEIGHT"
+DEFAULT_ACQUIRE_MAX_HEIGHT = 720
+_ACQUIRE_MAX_HEIGHT_MIN, _ACQUIRE_MAX_HEIGHT_MAX = 360, 2160
+
+
+def _acquire_max_height() -> int:
+    """Resolution cap from env, clamped to a sane band; falls back to the
+    720p default on an unset/invalid/out-of-range value."""
+    raw = os.environ.get(ENV_ACQUIRE_MAX_HEIGHT, "")
+    if not raw:
+        return DEFAULT_ACQUIRE_MAX_HEIGHT
+    try:
+        h = int(raw)
+    except ValueError:
+        return DEFAULT_ACQUIRE_MAX_HEIGHT
+    if _ACQUIRE_MAX_HEIGHT_MIN <= h <= _ACQUIRE_MAX_HEIGHT_MAX:
+        return h
+    return DEFAULT_ACQUIRE_MAX_HEIGHT
+
 
 def download_frames(
     youtube_video_id: str,
@@ -69,10 +94,12 @@ def download_frames(
 def _download_video(youtube_video_id: str, output_path: Path) -> None:
     """Download video from YouTube using yt-dlp (proxied when configured)."""
     url = f"https://www.youtube.com/watch?v={youtube_video_id}"
+    h = _acquire_max_height()
+    fmt = f"bestvideo[height<={h}][ext=mp4]/bestvideo[height<={h}]/best[height<={h}]"
     cmd = [
         "yt-dlp",
         "-f",
-        "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
+        fmt,
         "-o",
         str(output_path),
         "--no-playlist",
