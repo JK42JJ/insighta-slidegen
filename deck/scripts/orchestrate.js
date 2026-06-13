@@ -56,7 +56,7 @@ function buildResourcePrompt(type, r) {
 
 /* 메인: 분류 → 추출 → 빌드 → 검증 → 되먹임(자가수정) 루프. */
 async function orchestrate(resources, outPath, opts = {}) {
-  const { llm = (m) => callOpenRouter(m, opts.openrouter || {}), classify, minSlides = 12, maxAttempts = 3, link, figureAssets } = opts;
+  const { llm = (m) => callOpenRouter(m, opts.openrouter || {}), classify, minSlides = 12, maxAttempts = 3, link, figureAssets, figureTables } = opts;
   const routed = classify
     ? await classify(resources)
     : await route({ title: resources.title, description: resources.description, transcript: resources.transcript }, { mode: "hybrid", llm: (p) => llm([{ role: "user", content: p }]) });
@@ -72,7 +72,7 @@ async function orchestrate(resources, outPath, opts = {}) {
       messages.push({ role: "assistant", content: raw }, { role: "user", content: "JSON 파싱 실패. 설명 없이 스키마에 맞는 순수 JSON만 다시 출력하라." });
       continue;
     }
-    await buildRecipe(type, content, outPath, { link, figureAssets, silent: true });
+    await buildRecipe(type, content, outPath, { link, figureAssets, figureTables, silent: true });
     const v = validate(outPath, minSlides);
     if (v.pass) return { ok: true, type, attempts: attempt, out: outPath, routedFrom: routed.source };
     lastReport = v.report;

@@ -41,11 +41,17 @@ Load on every session start (`/init`): `MEMORY.md`, `work-efficiency.md`,
   `slide_slides`, `slide_figures`, `slide_keyframes`, `slide_jobs`.
 - Any write path touching a non-`slide_*` table is a bug — block it.
 
-### 🚨 LLM API call ban — dev/test (inherited, no exceptions) + prod boundary (ADR 0003)
-- These APIs are **production-service only** (inherited rule). In **dev, test,
-  CI, dataset generation, and experiments**, direct Anthropic API calls
-  (Messages + Batch) and OpenRouter API calls are **banned**. No "credit
-  check", "small test", "just 1", or "sample" exemptions.
+### 🚨 LLM API BULK ban — no batch dataset generation via API + prod boundary (ADR 0003)
+- **BULK is the line** (owner clarification 2026-06-13): **batch dataset
+  generation via API is banned** — direct Anthropic (Messages + Batch) or
+  OpenRouter calls that process MANY items offline (e.g. backfilling figures /
+  summaries across a corpus of videos) are forbidden in dev, test, CI, and
+  experiments. At-scale generation must run as a **service-triggered prod path**,
+  never an offline batch.
+- **Single-shot validation/test calls ARE allowed** — a 1–2 call lossless /
+  serving-parity / availability check is NOT bulk and is permitted (supersedes
+  the old "no 'just 1' / 'sample' exemption" wording). Use a standalone
+  validation script (construct the client directly), not the config-gated app.
 - **Prod service path (ADR 0003 D2)**: the deployed pipeline may call the
   slide-content LLM (Claude Sonnet via OpenRouter) **only inside the
   deterministic harness** (extract → buildRecipe → validate → FAIL feedback).

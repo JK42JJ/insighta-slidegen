@@ -181,17 +181,34 @@ function planFor(type, content) {
  * equation render). Only figures whose asset RESOLVED get a slide; an absent
  * asset is silently skipped (label-only — never a raw frame, ADR 0003 P2).
  * Returns the count placed (feeds the validate figure gate, §1d). */
-function injectFigureSlides(plan, content, figureAssets) {
+function injectFigureSlides(plan, content, figureAssets, figureTables) {
   const refs = Array.isArray(content.figures) ? content.figures : [];
-  if (!refs.length || !figureAssets) return 0;
+  if (!refs.length) return 0;
   const SEC = ["blue", "emerald", "violet", "amber", "rose", "slate"];
   const figurePlan = [];
   refs.forEach((ref, i) => {
-    const img = ref && ref.figure_id ? figureAssets[ref.figure_id] : null;
+    if (!ref || !ref.figure_id) return;
+    const cat = SEC[i % SEC.length];
+    // A1: a table-kind figure with a valid struct → NATIVE pptx table (editable),
+    // not a 300dpi raster. Empty/unparseable struct falls through to the image
+    // path below (graceful fallback — an image beats a broken empty table).
+    const tbl = figureTables ? figureTables[ref.figure_id] : null;
+    if (
+      ref.kind === "table" && tbl &&
+      Array.isArray(tbl.headers) && tbl.headers.length &&
+      Array.isArray(tbl.rows) && tbl.rows.length
+    ) {
+      figurePlan.push(["figureTableSlide", {
+        kicker: "Table", title: ref.title || ref.caption || "표",
+        cat, headers: tbl.headers, rows: tbl.rows, caption: ref.caption || "",
+      }]);
+      return;
+    }
+    const img = figureAssets ? figureAssets[ref.figure_id] : null;
     if (!img) return; // unresolved → label-only (no slide)
     figurePlan.push(["figureSlide", {
       kicker: "Figure", title: ref.title || ref.caption || "그림",
-      cat: SEC[i % SEC.length], img, caption: ref.caption || "",
+      cat, img, caption: ref.caption || "",
     }]);
   });
   if (!figurePlan.length) return 0;
@@ -205,7 +222,7 @@ async function buildRecipe(type, content, outPath, opts = {}) {
   const warn = checkContent(type, content);
   if (warn.length && !opts.silent) warn.forEach((w) => console.warn("⚠ 밀도:", w));
   const plan = planFor(type, content);
-  const placed = injectFigureSlides(plan, content, opts.figureAssets);
+  const placed = injectFigureSlides(plan, content, opts.figureAssets, opts.figureTables);
   if (placed && !opts.silent) console.warn("figures placed:", placed);
   const D = createDeck({ title: content.title || type });
   const S = makeSlides(D, { total: plan.length, link: opts.link || "https://insighta.one" });

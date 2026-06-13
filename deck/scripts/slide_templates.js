@@ -9,6 +9,53 @@
  *
  * 모든 메서드: 슬라이드 생성·푸터·페이지번호 자동. 다크 원자는 흰색 제목을 직접 렌더(header 미사용).
  */
+const fs = require("fs");
+
+/* Read a PNG's intrinsic pixel size from its IHDR (offset 16 = width, 20 =
+ * height, big-endian uint32). Returns null for non-PNG / unreadable files so
+ * the caller can fall back. pptxgenjs `sizing:{type:"contain"}` did NOT
+ * preserve aspect ratio for the figure slot (V02: every figure stretched to
+ * the slot box), so figureSlide computes the contain box itself. */
+function _pngSize(p) {
+  try {
+    const fd = fs.openSync(p, "r");
+    const buf = Buffer.alloc(24);
+    fs.readSync(fd, buf, 0, 24, 0);
+    fs.closeSync(fd);
+    if (buf.toString("ascii", 1, 4) !== "PNG") return null;
+    const w = buf.readUInt32BE(16), h = buf.readUInt32BE(20);
+    return w > 0 && h > 0 ? { w, h } : null;
+  } catch {
+    return null;
+  }
+}
+
+/* Render DPI of the figure PNGs (chart_regen / diagram_regen FIGURE_DPI). */
+const _FIGURE_DPI = 300;
+/* A3 font upper bound (placement): never enlarge a figure beyond this factor
+ * of its native size. A small diagram blown up to fill the slot produced
+ * absurd fonts (measured: a 4-node flow scaled 4.05× → ~44pt) and a blurry
+ * raster. Capping the enlargement keeps the on-slide font sane (~base ×1.6 ≈
+ * 17pt) and centres the figure in the remaining space. Aspect ratio is always
+ * preserved; the cap only limits scale-UP, never forces scale-DOWN. */
+const _MAX_FIGURE_SCALE_UP = 1.6;
+
+/* Fit an image inside the (maxW × maxH) slot at (x, y) PRESERVING aspect ratio
+ * (letterbox), centered, and never enlarged past _MAX_FIGURE_SCALE_UP×native
+ * (A3 font upper bound). Falls back to filling the slot when the size can't be
+ * read (old behavior — never worse than before). */
+function _fitContain(img, x, y, maxW, maxH) {
+  const px = _pngSize(img);
+  if (!px) return { x, y, w: maxW, h: maxH };
+  const ar = px.w / px.h;
+  let w = maxW, h = maxW / ar;
+  if (h > maxH) { h = maxH; w = maxH * ar; }
+  const nativeW = px.w / _FIGURE_DPI;
+  const capW = nativeW * _MAX_FIGURE_SCALE_UP;
+  if (w > capW) { w = capW; h = w / ar; } // cap scale-up (font sanity)
+  return { x: x + (maxW - w) / 2, y: y + (maxH - h) / 2, w, h };
+}
+
 function makeSlides(D, opts = {}) {
   const { pres, BRAND, shapes, newSlide, footer, header, flow, statCallout, chips, table, matrix2x2, connect, MX, CW } = D;
   const total = opts.total || 0;
@@ -262,9 +309,30 @@ function makeSlides(D, opts = {}) {
        원본 스크린샷이 아니라 chart_regen/equation 렌더 결과만 들어온다(ADR 0003 P2). */
     figureSlide({ kicker = "Figure", title, cat = "blue", img, caption }) {
       page++; const s = newSlide(); header(s, { kicker, title, cat });
-      const y = 1.62, h = 4.4;
-      s.addImage({ path: img, x: MX, y, w: CW, h, sizing: { type: "contain", w: CW, h } });
-      if (caption) s.addText(caption, { x: MX, y: y + h + 0.12, w: CW, h: 0.4, align: "center", fontFace: BRAND.font.body, fontSize: 11.5, italic: true, color: BRAND.muted, margin: 0 });
+      // AR-preserving placement: pptxgenjs "contain" stretched every figure to
+      // the slot (V02 bug). Compute the contain box from the PNG's native size
+      // and center it. Use the full vertical span down to the footer so wide
+      // diagrams (which fit to width → short height) still read as large as
+      // possible; the leftover is symmetric letterbox, never distortion.
+      const slotY = 1.62, slotH = caption ? 4.7 : 5.1;
+      const box = _fitContain(img, MX, slotY, CW, slotH);
+      s.addImage({ path: img, x: box.x, y: box.y, w: box.w, h: box.h });
+      if (caption) s.addText(caption, { x: MX, y: slotY + slotH + 0.12, w: CW, h: 0.4, align: "center", fontFace: BRAND.font.body, fontSize: 11.5, italic: true, color: BRAND.muted, margin: 0 });
+      footer(s, page, total); return s;
+    },
+
+    /* 14b. 재생성 figure-표 (A1) — table-kind CV figure를 PNG가 아닌 NATIVE pptx
+       표 객체로(struct headers/rows에서 직접). 편집 가능 + 300dpi 라스터 불필요.
+       빈/파싱실패 struct는 호출측(injectFigureSlides)이 figureSlide(PNG)로 graceful
+       fallback — 깨진 빈 표보다 이미지가 낫다. comparisonTable과 같은 네이티브 표. */
+    figureTableSlide({ kicker = "Table", title, cat = "blue", headers, rows, caption }) {
+      page++; const s = newSlide(); header(s, { kicker, title, cat });
+      const w = CW, cw = headers.map((_, i) => (i === 0 ? w * 0.26 : (w * 0.74) / Math.max(1, headers.length - 1)));
+      const top = 1.74, end = caption ? 6.0 : 6.5, nRows = rows.length + 1;
+      const rowH = Math.min(1.05, (end - top) / nRows);
+      const y = top + Math.max(0, (end - top - rowH * nRows) / 2);
+      table(s, { x: MX, y, w, headers, rows, cat, colW: cw, fontSize: 11.5, rowH });
+      if (caption) s.addText(caption, { x: MX, y: end + 0.12, w: CW, h: 0.4, align: "center", fontFace: BRAND.font.body, fontSize: 11.5, italic: true, color: BRAND.muted, margin: 0 });
       footer(s, page, total); return s;
     },
 
@@ -273,4 +341,4 @@ function makeSlides(D, opts = {}) {
   };
   return S;
 }
-module.exports = { makeSlides };
+module.exports = { makeSlides, _fitContain, _pngSize };

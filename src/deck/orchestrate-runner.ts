@@ -100,6 +100,10 @@ export type OrchestrateFn = (
     classify?: ClassifyFn;
     /** PR-A §1b: {figure_id → regenerated PNG path} the recipe places by ref. */
     figureAssets?: Record<string, string>;
+    /** A1: {figure_id → {headers, rows}} for table-kind figures rendered as
+     * NATIVE pptx tables (editable) instead of a raster; invalid structs are
+     * absent so the recipe falls back to the image. */
+    figureTables?: Record<string, { headers: unknown[]; rows: unknown[] }>;
   }
 ) => Promise<OrchestrateOutcome>;
 
@@ -261,6 +265,33 @@ function openRouterLlm(apiKey: string, model: string = DEFAULT_OPENROUTER_MODEL)
   };
 }
 
+// ── A3: keep the on-slide diagram font legible at the figure's placed size ───
+// The figure slot in figureSlide (slide_templates.js) and these MUST agree.
+const FIGURE_DPI = 300;
+const FIGURE_SLOT_W_IN = 12.09; // CW (content width)
+const FIGURE_SLOT_H_IN = 4.7; // figureSlide slot height (with caption)
+const FIGURE_MAX_SCALE_UP = 1.6; // matches _fitContain's _MAX_FIGURE_SCALE_UP
+const DIAGRAM_BASE_FONT_PT = 11; // diagram_regen node fontsize at font_scale=1
+const DIAGRAM_MIN_EFF_PT = 10; // floor for the on-slide font
+const DIAGRAM_MAX_FONT_SCALE = 2.0; // bound the bump (graphviz coupling damps it)
+
+/** PNG intrinsic size from the IHDR (offset 16/20, big-endian). null on a
+ * non-PNG / short read. Mirrors slide_templates.js `_pngSize`. */
+function pngSize(p: string): { w: number; h: number } | null {
+  try {
+    const fd = fs.openSync(p, 'r');
+    const buf = Buffer.alloc(24);
+    fs.readSync(fd, buf, 0, 24, 0);
+    fs.closeSync(fd);
+    if (buf.toString('ascii', 1, 4) !== 'PNG') return null;
+    const w = buf.readUInt32BE(16);
+    const h = buf.readUInt32BE(20);
+    return w > 0 && h > 0 ? { w, h } : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Chart-regen pre-step: mode-B struct → brand matplotlib PNG (≥ 300 dpi) via
  * `python -m deck_tools.chart_regen`. ANY failure (unsupported struct, regen
@@ -274,9 +305,11 @@ export function regenCharts(
   formulas: FormulaResource[] = []
 ): ChartAsset[] {
   const py = path.join(findRepoRoot(), 'py');
-  const run = (job: object, outPng: string): string | null => {
+  // module: chart_regen (matplotlib data charts + equations) OR diagram_regen
+  // (Graphviz structure: diagram/table — roadmap 2). Routed by kind.
+  const run = (module: string, job: object, outPng: string): string | null => {
     try {
-      const stdout = execFileSync(pythonBin, ['-m', 'deck_tools.chart_regen'], {
+      const stdout = execFileSync(pythonBin, ['-m', module], {
         cwd: py,
         input: JSON.stringify({ ...job, out: outPng }),
         encoding: 'utf8',
@@ -286,16 +319,49 @@ export function regenCharts(
       return null;
     }
   };
-  const chartAssets = charts.map((chart, index) => ({
-    figureId: chart.figure_id ?? null,
-    snapshot: chart.snapshot ?? null,
-    pngPath: run({ struct: chart.struct }, path.join(artifactsDir, `chart_${index}.png`)),
-  }));
+  /**
+   * A3 font lower bound (diagram/table only): render once, then if the figure
+   * will be scaled DOWN so far that its on-slide font drops below the floor,
+   * re-render with a bumped font_scale. Graphviz couples font↔layout (a bigger
+   * font grows the graph, which then downscales more), so the bump is damped —
+   * bounded by DIAGRAM_MAX_FONT_SCALE and accepted as a best-effort nudge, not
+   * exact targeting. The scale-UP (oversized) case is handled at placement by
+   * _fitContain's cap, so it needs no re-render here.
+   */
+  const renderDiagram = (struct: unknown, outPng: string): string | null => {
+    const first = run('deck_tools.diagram_regen', { struct }, outPng);
+    if (!first) return null;
+    const dim = pngSize(first);
+    if (!dim) return first;
+    const scale = Math.min(
+      FIGURE_SLOT_W_IN / (dim.w / FIGURE_DPI),
+      FIGURE_SLOT_H_IN / (dim.h / FIGURE_DPI),
+      FIGURE_MAX_SCALE_UP
+    );
+    const effFont = DIAGRAM_BASE_FONT_PT * scale;
+    if (effFont >= DIAGRAM_MIN_EFF_PT) return first;
+    const fontScale = Math.min(DIAGRAM_MAX_FONT_SCALE, DIAGRAM_MIN_EFF_PT / effFont);
+    return run('deck_tools.diagram_regen', { struct, font_scale: fontScale }, outPng) ?? first;
+  };
+  // Data charts (line/bar/scatter) → chart_regen; diagram/table → diagram_regen.
+  // Either failing returns null → label-only (never a raw frame, ADR 0003 P2).
+  const STRUCTURE_KINDS = new Set(['diagram', 'table']);
+  const chartAssets = charts.map((chart, index) => {
+    const out = path.join(artifactsDir, `chart_${index}.png`);
+    const pngPath = STRUCTURE_KINDS.has(chart.kind)
+      ? renderDiagram(chart.struct, out)
+      : run('deck_tools.chart_regen', { struct: chart.struct }, out);
+    return { figureId: chart.figure_id ?? null, snapshot: chart.snapshot ?? null, pngPath };
+  });
   // §1b: equations render too (mode C → mathtext PNG), same figure_id keying.
   const formulaAssets = formulas.map((formula, index) => ({
     figureId: formula.figure_id ?? null,
     snapshot: formula.snapshot ?? null,
-    pngPath: run({ kind: 'equation', latex: formula.latex }, path.join(artifactsDir, `eq_${index}.png`)),
+    pngPath: run(
+      'deck_tools.chart_regen',
+      { kind: 'equation', latex: formula.latex },
+      path.join(artifactsDir, `eq_${index}.png`)
+    ),
   }));
   return [...chartAssets, ...formulaAssets];
 }
@@ -305,6 +371,32 @@ export function buildFigureAssets(assets: ChartAsset[]): Record<string, string> 
   const map: Record<string, string> = {};
   for (const a of assets) {
     if (a.figureId && a.pngPath) map[a.figureId] = a.pngPath;
+  }
+  return map;
+}
+
+/**
+ * A1: {figure_id → {headers, rows}} for table-kind charts carrying a valid
+ * struct. The recipe renders these as NATIVE pptx tables (editable, no raster);
+ * a table with no headers or no rows is omitted, so injectFigureSlides falls
+ * back to the diagram_regen PNG (an image beats a broken empty table).
+ */
+export function buildFigureTables(
+  charts: ChartResource[]
+): Record<string, { headers: unknown[]; rows: unknown[] }> {
+  const map: Record<string, { headers: unknown[]; rows: unknown[] }> = {};
+  for (const c of charts) {
+    if (c.kind !== 'table' || !c.figure_id) continue;
+    const s = c.struct as { headers?: unknown; rows?: unknown } | null;
+    if (
+      s &&
+      Array.isArray(s.headers) &&
+      s.headers.length > 0 &&
+      Array.isArray(s.rows) &&
+      s.rows.length > 0
+    ) {
+      map[c.figure_id] = { headers: s.headers, rows: s.rows };
+    }
   }
   return map;
 }
@@ -331,6 +423,9 @@ export async function runOrchestrate(
     resources.formulas ?? []
   );
   const figureAssets = buildFigureAssets(chartAssets);
+  // A1: table-kind figures render as native pptx tables; invalid structs fall
+  // back to the PNG already in figureAssets.
+  const figureTables = buildFigureTables(resources.charts ?? []);
 
   // 3. vendored self-correction loop, llm explicitly injected. A builder
   //    crash escapes the vendored loop (only JSON-parse failures feed back),
@@ -340,6 +435,7 @@ export async function runOrchestrate(
     llm,
     minSlides: options.minSlides ?? DEFAULT_MIN_SLIDES,
     figureAssets, // §1b: recipe places by figure_id; empty map = all label-only
+    figureTables, // A1: native-table route for table-kind figures
     ...(options.link !== undefined ? { link: options.link } : {}),
     ...(options.classify !== undefined ? { classify: options.classify } : {}),
   };

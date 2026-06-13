@@ -11,8 +11,12 @@ reviewer can inspect what each stage saw and produced:
     ├── 04-numerize/    struct-JSON (charts) / LaTeX (formulas) per figure
     └── MANIFEST.md     per-stage counts + what flowed to the next stage
 
-The frame/crop PNGs themselves are already written by frames.py / figure_extract
-into the frames dir; this sink records the DECISIONS and DATA around them.
+The DECISIONS and DATA around each stage are recorded as JSON. In addition,
+the 02-detect SOURCE crops (the exact frame regions Qwen numerized) are copied
+into `02-detect/crops/` — without them the crops are ephemeral (frames working
+dir) and the review cannot run the crop|struct|render 3-panel that decides CV
+fidelity ("does Qwen's table/diagram match the actual frame?"). Crops persist
+only when an artifacts_dir is set (measurement runs), never in a normal prod run.
 
 Privacy (PUBLIC-repo rules): the real youtube_video_id is NEVER written —
 the caller passes the anonymous index label (e.g. "V02"). Caption/transcript
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -106,6 +111,10 @@ class StageArtifactSink:
                 for f in figures
             ],
         )
+        # Persist the SOURCE crops next to boxes.json so the review's
+        # crop|struct|render 3-panel can verify CV fidelity. crop_path in
+        # boxes.json already records each leaf filename — copy the file itself.
+        self._persist_crops(figures)
         self._write(
             "04-numerize",
             "data.json",
@@ -123,6 +132,26 @@ class StageArtifactSink:
             },
         )
 
+    def _persist_crops(self, figures: list) -> None:
+        """Copy each figure's source crop PNG into 02-detect/crops/ (leaf name
+        only — the /tmp/<youtube_id>/ dir segment is a PUBLIC-repo leak and is
+        stripped). No-op when no artifacts dir or a crop file is missing."""
+        if self.root is None:
+            return
+        crops_dir = self.root / "02-detect" / "crops"
+        crops_dir.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        for f in figures:
+            src = getattr(f, "png_path", None)
+            if not src or not os.path.exists(src):
+                continue
+            try:
+                shutil.copy(src, crops_dir / os.path.basename(str(src)))
+                copied += 1
+            except OSError:
+                pass  # a single bad crop must not abort the dump
+        self._counts["crops_persisted"] = copied
+
     def write_manifest(self) -> None:
         if self.root is None:
             return
@@ -130,11 +159,13 @@ class StageArtifactSink:
         lines = [
             f"# CV pipeline artifacts — {self.index}",
             "",
-            "Per-stage products (frame/crop PNGs live alongside; this records decisions+data).",
+            "Per-stage decisions+data as JSON; 02-detect also keeps the source crops.",
             "",
             f"- 01-keyframes: {c.get('candidates', '?')} candidates → "
             f"**{c.get('selected', '?')} selected** (selection.json — frame_type, score, why)",
-            f"- 02-detect: **{c.get('bbox', '?')} YOLO boxes** across selected frames (boxes.json)",
+            f"- 02-detect: **{c.get('bbox', '?')} YOLO boxes** across selected frames "
+            f"(boxes.json) + **{c.get('crops_persisted', 0)} source crops** (crops/ — "
+            f"for the crop|struct|render fidelity 3-panel)",
             f"- 04-numerize: **{c.get('charts', '?')} chart structs + {c.get('formulas', '?')} "
             f"formulas** (data.json) → flows to the bundle, then deck render",
             "",

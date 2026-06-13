@@ -13,6 +13,12 @@ dependencies = [
     "google-auth-oauthlib>=1.1",
     "reportlab>=4.0",
     "pydantic>=2.0",
+    # chart_regen (matplotlib) + diagram_regen (Graphviz, roadmap 2). The
+    # `graphviz` lib shells out to the `dot` binary — CI installs graphviz via
+    # apt; the renderer degrades to label-only when dot is absent.
+    "matplotlib>=3.8",
+    "graphviz>=0.20",
+    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]

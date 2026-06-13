@@ -4,9 +4,22 @@ No network, no GPU; matplotlib Agg only. Unknown structs must return None
 (the caller falls back to label-only — never to a raw frame, ADR 0003 P2).
 """
 
+import warnings
+
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
 from PIL import Image
 
 from deck_tools.chart_regen import FIGURE_DPI, SUPPORTED_CHART_TYPES, regenerate_chart
+
+KOREAN_BAR_STRUCT = {
+    "chart_type": "bar",
+    "axes": {"x": "난이도", "y": "질문 수"},
+    "series": [
+        {"name": "", "points": [{"label": "쉬움", "value": 10}, {"label": "어려움", "value": 10}]}
+    ],
+    "insight": "난이도별 질문 수는 균일하다",
+}
 
 LINE_STRUCT = {
     "chart_type": "line",
@@ -64,6 +77,31 @@ def test_unknown_chart_type_returns_none(tmp_path):
     assert regenerate_chart({}, out) is None
     assert regenerate_chart("not a dict", out) is None
     assert not out.exists()
+
+
+def test_korean_font_registered_as_default_family():
+    """Regression (V02 live run): chart axis labels rendered Korean as □ because
+    matplotlib defaulted to DejaVu Sans. Importing chart_regen must register the
+    bundled NanumGothic and make it the active family (parity with
+    diagram_regen's dot-path font forcing)."""
+    registered = {f.name for f in font_manager.fontManager.ttflist}
+    assert "NanumGothic" in registered
+    family = plt.rcParams["font.family"]
+    assert "NanumGothic" in (family if isinstance(family, list) else [family])
+
+
+def test_korean_labels_render_without_missing_glyph_warning(tmp_path):
+    """A Korean-labelled chart must render with no 'missing from font' warning —
+    the exact symptom the V02 run surfaced. axes.unicode_minus is off so
+    negative ticks don't tofu either."""
+    assert plt.rcParams["axes.unicode_minus"] is False
+    out = tmp_path / "korean.png"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert regenerate_chart(KOREAN_BAR_STRUCT, out) == str(out)
+    glyph_warnings = [w for w in caught if "missing from font" in str(w.message)]
+    assert not glyph_warnings, f"Korean glyphs fell back to a tofu font: {glyph_warnings}"
+    assert out.exists()
 
 
 def test_struct_without_numeric_data_returns_none(tmp_path):

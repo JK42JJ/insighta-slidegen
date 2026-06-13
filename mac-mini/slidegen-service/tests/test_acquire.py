@@ -100,6 +100,43 @@ def test_download_video_uses_proxy_when_env_set(tmp_path, monkeypatch):
     assert "--proxy" not in mock_run.call_args[0][0]
 
 
+def _fmt_for(monkeypatch, tmp_path, value):
+    """Run _download_video with the height env set to `value` (None = unset)
+    and return the yt-dlp `-f` format string it built."""
+    from acquire import ENV_ACQUIRE_MAX_HEIGHT, _download_video
+
+    if value is None:
+        monkeypatch.delenv(ENV_ACQUIRE_MAX_HEIGHT, raising=False)
+    else:
+        monkeypatch.setenv(ENV_ACQUIRE_MAX_HEIGHT, value)
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    with patch("acquire.subprocess.run", return_value=mock_result) as mock_run:
+        _download_video("12345678abc", tmp_path / "video.mp4")
+    cmd = mock_run.call_args[0][0]
+    return cmd[cmd.index("-f") + 1]
+
+
+def test_acquire_height_defaults_to_720_when_unset(tmp_path, monkeypatch):
+    """The no-op default (unset) must keep the existing 720p cap — the rollback
+    path for the (a) 1080p experiment."""
+    assert "height<=720" in _fmt_for(monkeypatch, tmp_path, None)
+    assert "1080" not in _fmt_for(monkeypatch, tmp_path, None)
+
+
+def test_acquire_height_honors_1080_when_set(tmp_path, monkeypatch):
+    """SLIDEGEN_ACQUIRE_MAX_HEIGHT=1080 → every yt-dlp format clause caps at 1080."""
+    fmt = _fmt_for(monkeypatch, tmp_path, "1080")
+    assert "height<=1080" in fmt
+    assert "height<=720" not in fmt
+
+
+def test_acquire_height_falls_back_on_invalid_or_out_of_range(tmp_path, monkeypatch):
+    """A non-int / out-of-band value falls back to 720 (never crashes acquire)."""
+    assert "height<=720" in _fmt_for(monkeypatch, tmp_path, "huge")
+    assert "height<=720" in _fmt_for(monkeypatch, tmp_path, "99999")  # > 2160 → default
+
+
 def test_extract_section_frames_creates_jpegs(tmp_path):
     """_extract_section_frames should create JPEG files with correct naming."""
     from acquire import _extract_section_frames

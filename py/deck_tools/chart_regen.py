@@ -27,12 +27,48 @@ Bar-chart points may also use the reference {"label": "", "value": 0} form
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402  (backend must be set before pyplot)
+from matplotlib import font_manager  # noqa: E402
+
+# ── Korean glyph support (invariant 8 parity with diagram_regen) ─────────────
+# matplotlib's default DejaVu Sans renders Hangul as □ (the V02 live run showed
+# tofu in chart axis labels). diagram_regen forces NanumGothic for the Graphviz
+# (dot) path; the matplotlib path needs the same guarantee. matplotlib keeps its
+# OWN font cache (not fontconfig), so registering the bundled TTF with the
+# font_manager and setting it as the default family is enough — no fc-cache step
+# (unlike diagram_regen, whose dot binary reads fontconfig). Best-effort: a
+# missing asset degrades to the matplotlib default rather than crashing.
+_KOREAN_FONT_FAMILY = "NanumGothic"
+
+
+def _install_matplotlib_korean_font() -> bool:
+    """Register the bundled NanumGothic with matplotlib and make it the default
+    family so Korean axis labels/titles render. Idempotent; returns True when a
+    Korean-capable family is active."""
+    assets = Path(__file__).parent / "assets"
+    regular = assets / "NanumGothic.ttf"
+    if not regular.exists():
+        return False
+    try:
+        for ttf in (regular, assets / "NanumGothic-Bold.ttf"):
+            if ttf.exists():
+                font_manager.fontManager.addfont(str(ttf))
+        plt.rcParams["font.family"] = _KOREAN_FONT_FAMILY
+        # ASCII hyphen for minus so negative ticks don't render as □ (the
+        # Unicode minus glyph is absent from NanumGothic).
+        plt.rcParams["axes.unicode_minus"] = False
+        return True
+    except Exception:  # noqa: BLE001 — font setup must never block rendering
+        return False
+
+
+_install_matplotlib_korean_font()
 
 # ── Insighta palette (deck/scripts/figures.py — brand constants) ─────────────
 INK = "#0F172A"
@@ -119,8 +155,9 @@ def regenerate_chart(struct: dict, out_path: str | os.PathLike) -> str | None:
             ax.set_xlabel(str(axes["x"]), fontsize=10, color=INK)
         if axes.get("y"):
             ax.set_ylabel(str(axes["y"]), fontsize=10, color=INK)
-        if struct.get("insight"):
-            ax.set_title(str(struct["insight"]), fontsize=10.5, color=INK, pad=8)
+        # A2: the insight/title is NOT baked into the PNG — the slide template
+        # renders it as editable text (figureSlide title + caption). Only the
+        # plot area (+ data-essential axis labels) belongs in the raster.
         if any(name for name, _xs, _ys in series):
             ax.legend(frameon=False, fontsize=9)
 
@@ -223,8 +260,7 @@ def _regenerate_bar_broken(
             ax_bot.set_ylabel(str(axes["y"]), fontsize=10, color=INK)
         if axes.get("x"):
             ax_bot.set_xlabel(str(axes["x"]), fontsize=10, color=INK)
-        if struct.get("insight"):
-            ax_top.set_title(str(struct["insight"]), fontsize=10.5, color=INK, pad=8)
+        # A2: insight/title rendered as editable slide text, not baked here.
         plt.tight_layout(pad=0.4)
         fig.savefig(out_path, transparent=True, bbox_inches="tight", dpi=FIGURE_DPI)
     finally:

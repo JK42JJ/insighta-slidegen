@@ -425,3 +425,32 @@ def test_self_consistency_agreement_keeps(tmp_path):
     vlm.script_content(CHART_REPLY, CHART_REPLY)  # both calls agree → kept
     figs = run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path, self_consistency=True)
     assert len(figs) == 1 and figs[0].kind == "chart"
+
+
+def test_gate_diagram_phantom_node_edge_rejected(tmp_path):
+    """roadmap 2 §5: a diagram whose edge references an undeclared node is a
+    numerize hallucination → rejected (label-only)."""
+    yolo = make_yolo_stub([{"bbox": {"x": 0, "y": 0, "w": 60, "h": 60}, "class": "figure", "score": 0.9}])
+    vlm = VlmStub()
+    vlm.script_content(json.dumps({
+        "kind": "diagram",
+        "struct": {"diagram_type": "flow", "nodes": [{"id": "a", "label": "A"}],
+                   "edges": [{"from": "a", "to": "ghost"}], "insight": "flow"},
+        "confidence": 0.9,
+    }))
+    assert run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path) == []
+
+
+def test_gate_valid_diagram_passes(tmp_path):
+    """A consistent diagram (edges reference declared nodes) survives the gate."""
+    yolo = make_yolo_stub([{"bbox": {"x": 0, "y": 0, "w": 60, "h": 60}, "class": "figure", "score": 0.9}])
+    vlm = VlmStub()
+    vlm.script_content(json.dumps({
+        "kind": "diagram",
+        "struct": {"diagram_type": "flow",
+                   "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                   "edges": [{"from": "a", "to": "b"}], "insight": "two-step flow"},
+        "confidence": 0.9,
+    }))
+    figs = run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path, self_consistency=False)
+    assert len(figs) == 1 and figs[0].kind == "diagram"
