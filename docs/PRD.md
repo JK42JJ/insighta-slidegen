@@ -1,5 +1,11 @@
 # PRD: insighta-slidegen
 
+> **🔀 Scope pivot (2026-06-15): single-video → deck is now an intermediate.** The
+> project's output unit moved to **mandala (video-collection) → one deck**. This
+> doc records the v1 single-video design, retained for history/reuse (per-video CV
+> stages still apply). Consolidated archive:
+> [`docs/archive/v1-single-video-per-deck.md`](./archive/v1-single-video-per-deck.md).
+
 **Version**: 0.1 (design)
 **Status**: Pre-implementation — schema + skeleton phase
 **Scope**: Card-level deck generation (v1). Mandala-level aggregation is deferred to v2.

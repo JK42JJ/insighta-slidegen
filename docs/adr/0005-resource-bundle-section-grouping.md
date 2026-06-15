@@ -1,5 +1,11 @@
 # ADR 0005 — Resource-bundle section grouping (additive section view)
 
+> **🔀 Scope pivot (2026-06-15): single-video → deck is now an intermediate.** The
+> project's output unit moved to **mandala (video-collection) → one deck**. This
+> doc records the v1 single-video design, retained for history/reuse (per-video CV
+> stages still apply). Consolidated archive:
+> [`docs/archive/v1-single-video-per-deck.md`](../archive/v1-single-video-per-deck.md).
+
 **Status**: Proposed (design direction only — no code/schema change in this ADR)
 **Date**: 2026-06-12
 **Extends**: [ADR 0003](./0003-mvp-pptx-output-and-prod-llm-extraction.md) §3 stage 7 (resource

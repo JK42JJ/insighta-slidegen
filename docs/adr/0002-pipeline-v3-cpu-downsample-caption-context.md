@@ -1,5 +1,11 @@
 # ADR 0002 — Pipeline v3: CPU downsample + caption-context VLM routing
 
+> **🔀 Scope pivot (2026-06-15): single-video → deck is now an intermediate.** The
+> project's output unit moved to **mandala (video-collection) → one deck**. This
+> doc records the v1 single-video design, retained for history/reuse (per-video CV
+> stages still apply). Consolidated archive:
+> [`docs/archive/v1-single-video-per-deck.md`](../archive/v1-single-video-per-deck.md).
+
 > ⚠️ **Amended by [ADR 0003 — Single-video MVP](./0003-mvp-pptx-output-and-prod-llm-extraction.md) (2026-06-10).**
 > The CV stages below (D1–D6, D8, D9) remain the accepted design. What §4 of this
 > ADR carried forward from 0001 is revised by 0003: **output** (Google Slides +

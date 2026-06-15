@@ -1,5 +1,11 @@
 # insighta-slidegen
 
+> **🔀 Scope pivot (2026-06-15): single-video → deck is now an intermediate.** The
+> project's output unit moved to **mandala (video-collection) → one deck**. The v1
+> single-video design below is retained for history/reuse (per-video CV stages
+> still apply). Consolidated archive:
+> [`docs/archive/v1-single-video-per-deck.md`](docs/archive/v1-single-video-per-deck.md).
+
 Convert an Insighta video card's v2 rich-summary into a typed **.pptx deck** — figures are **regenerated from extracted data** (native editable objects + ≥300 dpi data graphs), never pasted raw frames. See [ADR 0003](./docs/adr/0003-mvp-pptx-output-and-prod-llm-extraction.md) (output/synthesis) and [ADR 0002](./docs/adr/0002-pipeline-v3-cpu-downsample-caption-context.md) (CV pipeline). A Google Slides + true-vector-PDF output is a deferred additive track.
 
 > PUBLIC repo — essentials only (code, schema, IaC, contributor docs). No credentials, ops runbooks, user data, or prod metrics.

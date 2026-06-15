@@ -1,5 +1,11 @@
 # ADR 0003 — Single-video MVP: .pptx output, prod-path LLM extraction, acquire proxy
 
+> **🔀 Scope pivot (2026-06-15): single-video → deck is now an intermediate.** The
+> project's output unit moved to **mandala (video-collection) → one deck**. This
+> doc records the v1 single-video design, retained for history/reuse (per-video CV
+> stages still apply). Consolidated archive:
+> [`docs/archive/v1-single-video-per-deck.md`](../archive/v1-single-video-per-deck.md).
+
 **Status**: Accepted
 **Date**: 2026-06-10
 **Amends**: [ADR 0002 — Pipeline v3](./0002-pipeline-v3-cpu-downsample-caption-context.md).
