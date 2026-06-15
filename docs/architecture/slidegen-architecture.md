@@ -1,5 +1,11 @@
 # Slidegen Architecture
 
+> **🔀 Scope pivot (2026-06-15): single-video → deck is now an intermediate.** The
+> project's output unit moved to **mandala (video-collection) → one deck**. This
+> doc records the v1 single-video design, retained for history/reuse (per-video CV
+> stages still apply). Consolidated archive:
+> [`docs/archive/v1-single-video-per-deck.md`](../archive/v1-single-video-per-deck.md).
+
 **Version**: 0.1
 **Status**: Design
 **Companion docs**: `docs/PRD.md` (full spec), `docs/CONTRACT_figure-manifest.md` (CV<->planner contract)
