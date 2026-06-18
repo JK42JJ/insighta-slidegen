@@ -84,6 +84,7 @@ dist-info/
 # the Korean working overview, screenshots, and memory snapshots.
 v1/
 v2/
+v3/
 클로드/
 CV_PIPELINE_OVERVIEW.md
 TOOLS_AND_DECISIONS.md
