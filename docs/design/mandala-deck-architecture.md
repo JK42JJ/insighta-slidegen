@@ -93,6 +93,13 @@ PaddleOCR stack (no VLM). Run on a handful of real lecture slides
 
 ## 4. Front-end redesign (what the output-unit pivot deletes)
 
+> **⚠ SUPERSEDED (2026-06-18).** The ffmpeg + OpenCV/SSIM "one clean frame per
+> window" front-end below was measured to drop real slides (a topic-sized window
+> holds many slides; one frame loses the rest). The figure front-end is now a
+> **window-scoped V1 CV** chain (PySceneDetect → pHash, run inside each selected
+> window) plus pre/post-MinerU gates. See the current SSOT:
+> [`pipeline.md` §5](./pipeline.md). The table below is kept for history.
+
 The old single-video front-end existed to *find slides in an unstructured video*.
 With per-window relevance + timestamps, that job is gone.
 

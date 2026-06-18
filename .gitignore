@@ -78,3 +78,14 @@ prisma/dev.db-journal
 # Python venvs / build artifacts
 *.egg-info/
 dist-info/
+
+# Local CV-pipeline scratch — NEVER commit (may hold real YouTube ids + large
+# media; the canonical design lives in docs/design/pipeline.md). Working dirs,
+# the Korean working overview, screenshots, and memory snapshots.
+v1/
+v2/
+클로드/
+CV_PIPELINE_OVERVIEW.md
+TOOLS_AND_DECISIONS.md
+checkpoint-archive.md
+Screenshot_*.png
