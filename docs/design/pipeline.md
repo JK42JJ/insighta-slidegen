@@ -1,7 +1,7 @@
 # Design — Slidegen Pipeline (Total + CV), SSOT
 
 **Status**: Design (consolidated direction; per-stage implementation status tagged inline)
-**Date**: 2026-06-18
+**Date**: 2026-06-18 (rev. 2026-06-19 — figure front-end = restore V1 preselect, select-before-extract; supersedes standalone [P] + F4-lite)
 **Scope**: Mandala (video collection) → one deck. Combines the *total* pipeline
 and the *CV figure* sub-pipeline in one place to avoid the doc drift that left
 [`mandala-deck-architecture.md`](./mandala-deck-architecture.md) §4/§5 stale.
@@ -52,8 +52,8 @@ and the *CV figure* sub-pipeline in one place to avoid the doc drift that left
   [3] PILLAR 1  text consolidation (first)   [4] PILLAR 2  figure enrichment
        embed (BGE-M3) -> cluster ->            window-scoped CV sub-pipeline
        common-core / distinctive ->            (see section 5)
-       rank/cap -> consolidated_doc            [Built] F1,F2,F3,P
-       [Designed] (multi-video)                [Designed] F2g,F4-lite  [Deferred] F4  [Stub] F5
+       rank/cap -> consolidated_doc            [Built] F1,F2,F3
+       [Designed] (multi-video)                [Designed-port] S(preselect) · [Designed] F2g · [Deferred] F4 · [Stub] F5
         |---------------------|
                               v
   [5] INTEGRATE  consolidated_doc (text) (X) figures (by timestamp/section)
@@ -133,20 +133,25 @@ mandala data and is the highest-value unknown — gated on [0].
 ```
   [2] ROUTE  needs_figure=true sections {vid, t0, t1, rel%}
                          |
-  === before MinerU (cheap filtering) =========================
+  === before MinerU (cheap dedup) =============================
   [F1] PySceneDetect   window-range decode (360p) -> scene multi-sample keyframes   [Built]
                          v
   [F2] pHash dedup     merge adjacent near-dups in-window -> distinct K            [Built]
                          v
   [F2g] global dedup   merge non-adjacent / cross-window dups + rel% cap           [Designed]
                          v
-  [P]  person cut      yolo11n: drop frames where a person fills >= 50% of frame   [Built]
-  === MinerU (object extraction) ==============================
+  === SELECT before extract (V1 preselect front-end, restored) ================
+  [S]  preselect       DocLayout-YOLO content boxes (text/eq/table/diagram)        [Designed-port]
+                       + COMBINE person gate (content-box-aware):
+                         DROP if person-dominant (>=0.18) AND NOT strong-figure
+                                AND no substantial text/eq/table (>=2% area)
+                         KEEP if a real slide region (diagram >=0.80 OR text >=2%)
+                       => only "explanation" frames survive; lecturers dropped,
+                          portrait/diagram slides kept (the V1 combine rule)
+  === MinerU (object extraction, on [S] survivors only) =======================
   [F3] MinerU (warm)   text / equation->LaTeX / table->HTML / figure-crop          [Built]
-                         (+ content==0 -> talking-head DROP, a byproduct)
-  === after MinerU (precise judgement + regen) ================
-  [F4-lite] person-vs-figure   yolo11n on each crop: a person crop is not a figure [Designed]  (fixes #21)
-            KEEP = real text/eq/table OR a non-person figure ; DROP = person only
+                       runs ONLY on selected frames -> fewer frames = lower cost
+                       (+ content==0 -> empty-frame DROP, a residual byproduct)
                          v
   [F4]  Qwen figure-type + chart->data (precise)                                   [Deferred]
                          v
@@ -162,9 +167,10 @@ mandala data and is the highest-value unknown — gated on [0].
 | F1 | PySceneDetect (BSD) | threshold=8 · min_scene=2s · sample_step=2.5s · cap=10 · long_gap=20s · keyframe end−0.4s · **360p** · download-truncation guard | **[Built]** |
 | F2 | pHash / OpenCV (BSD) | hamming=8 bits · 32→8 DCT (64-bit) · rep = last frame in group · group-index naming | **[Built]** |
 | F2g | same pHash, all-pairs | non-adjacent global merge + rel%-weighted top-K cap | **[Designed]** |
-| P | yolo11n COCO (local) | PERSON_FRAC=0.50 (conservative) · conf=0.40 · runs in the ts3a venv | **[Built]** |
-| F3 | MinerU pipeline backend (⚠ bundles AGPL detectors) | warm = model loaded once · lang | **[Built]** |
-| F4-lite | yolo11n (local) | crop is a person → its figure is void | **[Designed]** |
+| **S** (preselect) | DocLayout-YOLO (⚠ AGPL) + yolo11n COCO (local) | layout-only pass (~0.63 s/frame) · FIGURE_CONF_KEEP=0.80 · MIN_TEXT_AREA_FRAC=0.02 · PERSON_FRAC=0.18 + `has_strong_figure` portrait-trap guard · COMBINE rule | **[Designed-port]** — V1 `v1/ts_preselect/preselect.py`, validated |
+| F3 | MinerU pipeline backend (⚠ bundles AGPL detectors) | warm = model loaded once · lang · runs on **[S] survivors only** | **[Built]** |
+| ~~F4-lite~~ | — | **superseded by [S]** (selection is content-box-aware up front); keep at most as optional defense-in-depth | **[Superseded]** |
+| ~~P~~ (standalone 0.50) | — | **superseded by [S]** — the V1 combine gate replaces the weak standalone person-fraction cut | **[Superseded]** |
 | F4 | Qwen VLM (Apache) | figure type + chart→data | **[Deferred]** |
 | F5 | matplotlib etc. | equations/tables/charts first | **[Stub]** |
 
@@ -181,19 +187,33 @@ runs/<video_id>/
 
 ---
 
-## 6. Figure gate — three layers (where, and why there)
+## 6. Figure gate — two layers (select before extract)
 
 | Gate | Position | Catches | Role / limit |
 |---|---|---|---|
-| `needs_figure` | entry (from summary) | whole talking-head / text-only sections | coarse net; a whole vlog ends here |
-| **[P]** person cut | before MinerU | frames a person fills (≥50%) | safe, partial (a small on-screen person passes) |
-| F3 `content==0` | MinerU byproduct | genuinely empty frames | misses person-as-figure (#21) |
-| **F4-lite** | after MinerU | person-figures with no text | fine net; residual talking-head (#21) |
+| `needs_figure` | entry (from summary) | whole talking-head / text-only sections | coarse net; a whole vlog ends here, never reaches CV |
+| **[S]** preselect | before MinerU | lecturer / person-dominant frames with no slide content | authoritative keep/drop; keeps any frame with a real slide region |
+| F3 `content==0` | MinerU byproduct | genuinely empty survivors | residual safety only; not the primary gate |
 
-The reliable "person vs slide" decision needs MinerU's content boxes, so the
-precise gate is **after** MinerU (F4-lite), while the cheap safe cut ([P]) and
-all dedup run **before** MinerU. A whole-vlog video never enters here at all
-(handled by `needs_figure`).
+**Why the precise gate moved *before* MinerU.** The person-vs-slide decision
+needs an "is there explanation content?" signal — and DocLayout-YOLO (the V1
+preselect detector) already produces that signal (text/eq/table/diagram boxes)
+in one cheap layout-only pass, *without* running MinerU. So the V1 COMBINE rule
+— drop a person-dominant frame ONLY when it has no strong figure AND no
+substantial text — runs up front. This is why a separate after-MinerU person
+check (the former F4-lite) is no longer needed: selection already had the
+content signal, so it is **superseded by [S]**.
+
+**Empirical basis.** The V1 preselect front-end was validated on a lecture CV
+regression run: diagram/figure slides were KEPT while talking-head / lecturer
+frames were DROPPED by the combine gate (a low-confidence diagram slide is
+rescued by the area-based strong-figure rule; a lecturer showing only an edge
+caption is dropped). MinerU then runs only on the survivors → fewer frames,
+lower cost (select-before-extract).
+
+> Note: DocLayout-YOLO is AGPL (see §8 licensing); the same detector is bundled
+> inside MinerU, so running it once up front for *selection* (layout-only) does
+> not change the licensing posture — it is already AGPL via MinerU.
 
 ---
 
@@ -204,7 +224,10 @@ all dedup run **before** MinerU. A whole-vlog video never enters here at all
    v2 fixture). The figure-optional safety net comes for free.
 2. **[2] Routing** — summary-driven text-only vs +figure (slots into the spine).
 3. **[3] Pillar 1 consolidation** (multi-video) — needs real mandala data ([0]).
-4. **[5] Integrate** + finish figures ([4]: F2g, F4-lite; [F5] redraw).
+4. **[5] Integrate** + finish figures ([4]: restore the **[S] preselect**
+   front-end (V1 `preselect.py` — DocLayout-YOLO content boxes + combine person
+   gate, run before MinerU = select-before-extract) + F2g global dedup; [F5]
+   redraw). [S] supersedes the standalone [P] cut and the after-MinerU F4-lite.
 5. **[0] membership read-grant** (owner decision).
 
 ---
@@ -232,7 +255,7 @@ all dedup run **before** MinerU. A whole-vlog video never enters here at all
 | PySceneDetect @360p, ~49-min video | ~75 s (decode-bound; threshold-independent) |
 | MinerU cold → warm | ~40 s/frame → ~1.5 s/frame (≈26× — the lever is model-load-once, not GPU) |
 | [P] calibration | Sample A (vlog) max person-fraction ≈ 0.68; Sample B (slides) max ≈ 0.35 → cut 0.50 drops 18/188 vlog frames, **0/269** slide frames |
-| [P] e2e on Sample A (pure vlog) | 188 distinct → P removes 18 → MinerU 170 → F3 drops 2 → **168 remain** → demonstrates [P] alone is insufficient for a pure vlog; F4-lite / `needs_figure` are required |
+| standalone [P] e2e on Sample A (pure vlog) | 188 distinct → P removes 18 → MinerU 170 → F3 drops 2 → **168 remain** → the standalone [P] (0.50, no content signal) is insufficient for a pure vlog. This motivates **restoring the V1 [S] preselect combine gate** (content-box-aware, drops the residual lecturers) + the `needs_figure` entry gate (a pure vlog should not reach CV at all) |
 
 ---
 
