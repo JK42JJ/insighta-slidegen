@@ -333,6 +333,97 @@ def test_salvage_returns_none_when_no_complete_boundary():
     assert _salvage_truncated_json('{"kind":"diagram","struct":{"nodes":[{"id":"n1') is None
 
 
+# ── R3 reorder — confidence precedes struct so it survives truncation ─────────
+
+
+def test_reorder_salvage_keeps_real_confidence_and_is_returned():
+    """With confidence before struct (reorder), a truncated reply still carries a
+    real confidence; a SMALL legit diagram salvages and is returned (the guard
+    must NOT over-fire on a normal partial)."""
+    stub = VlmStub()
+    # reorder-shaped reply: kind, confidence, then struct truncated mid-edges
+    stub.script_truncated(
+        '{"kind":"diagram","confidence":0.88,"struct":{"diagram_type":"flow",'
+        '"nodes":[{"id":"a","label":"입력"},{"id":"b","label":"출력"}],'
+        '"edges":[{"from":"a","to":"b","style":"solid"},{"from":"a","to'
+    )
+    out = make_vlm_client(stub).classify_crop(IMG, "p")
+    assert out["kind"] == "diagram"
+    assert out["confidence"] == 0.88  # survived truncation (reorder payoff)
+    assert [n["id"] for n in out["struct"]["nodes"]] == ["a", "b"]
+    assert len(stub.requests) == 1
+
+
+# ── R3 fail-closed guard — drop salvaged OVER-GENERATION (hallucination) ──────
+
+
+def _truncated_diagram(nodes_json, edges_json="") -> str:
+    body = f'{{"kind":"diagram","confidence":0.95,"struct":{{"nodes":[{nodes_json}'
+    return body if not edges_json else body + f'],"edges":[{edges_json}'
+
+
+def test_guard_drops_salvage_with_too_many_nodes():
+    from model_clients import STAGE_RECOGNIZE, VlmContractError
+
+    nodes = ",".join(f'{{"id":"x{i}","label":"L{i}"}}' for i in range(40))  # >30
+    stub = VlmStub()
+    stub.script_truncated(_truncated_diagram(nodes))
+    with pytest.raises(VlmContractError) as ex:
+        make_vlm_client(stub).classify_crop(IMG, "p")
+    assert ex.value.stage == STAGE_RECOGNIZE
+    assert len(stub.requests) == 1  # no re-ask on truncation
+
+
+def test_guard_drops_salvage_with_too_many_edges():
+    from model_clients import VlmContractError
+
+    nodes = ",".join(f'{{"id":"a{i}","label":"L"}}' for i in range(5)) + "]"
+    edges = ",".join('{"from":"a0","to":"a1","style":"solid"}' for _ in range(45))  # >40
+    stub = VlmStub()
+    stub.script_truncated(_truncated_diagram(nodes.rstrip("]"), edges))
+    with pytest.raises(VlmContractError):
+        make_vlm_client(stub).classify_crop(IMG, "p")
+
+
+def test_guard_drops_salvage_with_sequential_placeholder_ids():
+    """Q2273, Q2274, … = fabricated sequential ids (R3 V3 signature)."""
+    from model_clients import VlmContractError
+
+    nodes = ",".join(f'{{"id":"Q{2273 + i}","label":"?"}}' for i in range(8))  # 8 consecutive
+    stub = VlmStub()
+    stub.script_truncated(_truncated_diagram(nodes))
+    with pytest.raises(VlmContractError):
+        make_vlm_client(stub).classify_crop(IMG, "p")
+
+
+def test_guard_does_not_fire_on_normal_small_diagram():
+    """A legit small diagram (few nodes, real non-sequential ids) salvages fine."""
+    stub = VlmStub()
+    stub.script_truncated(
+        '{"kind":"diagram","confidence":0.9,"struct":{"diagram_type":"tree",'
+        '"nodes":[{"id":"root","label":"개요"},{"id":"leaf","label":"세부"}],'
+        '"edges":[{"from":"root","to":"leaf","style":"solid"},{"from":"root","to'
+    )
+    out = make_vlm_client(stub).classify_crop(IMG, "p")
+    assert out["kind"] == "diagram" and out["confidence"] == 0.9
+
+
+def test_overgeneration_guard_unit_cases():
+    from model_clients import _has_sequential_id_run, _salvage_looks_overgenerated
+
+    assert _has_sequential_id_run([f"Q{2273 + i}" for i in range(6)], 6) is True
+    assert _has_sequential_id_run(["a1", "b2", "c3"], 6) is False  # different prefixes
+    assert _has_sequential_id_run(["n1", "n2", "n5", "n9"], 3) is False  # not consecutive
+    big = {"struct": {"nodes": [{"id": f"x{i}"} for i in range(31)], "edges": []}}
+    assert _salvage_looks_overgenerated(big) is True
+    many_edges = {"struct": {"nodes": [{"id": "a"}], "edges": [{} for _ in range(41)]}}
+    assert _salvage_looks_overgenerated(many_edges) is True
+    seq = {"struct": {"nodes": [{"id": f"Q{2273 + i}"} for i in range(6)], "edges": []}}
+    assert _salvage_looks_overgenerated(seq) is True
+    ok = {"struct": {"nodes": [{"id": "root"}, {"id": "leaf"}], "edges": [{"from": "root", "to": "leaf"}]}}
+    assert _salvage_looks_overgenerated(ok) is False
+
+
 # ── §2.3 — retry/backoff + failure attribution ───────────────────────────────
 
 

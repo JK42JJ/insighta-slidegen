@@ -352,10 +352,9 @@ def _salvage_truncated_json(text: str) -> Any | None:
 
 def _warn_salvage(stage: str, salvaged: Any) -> None:
     """Emit a non-fatal stderr line marking a SALVAGED truncation (distinct
-    from a skip). Confidence is the LAST contract field, so a current-prompt
-    truncation drops it (defaults 0.0) and the crop still fails the downstream
-    confidence floor — the Phase-2 prompt reorder is what makes salvage pay
-    off. The count of recovered array elements is the recoverability signal."""
+    from a skip). With the reorder (confidence precedes struct, figure_extract),
+    a salvaged truncation usually keeps a real confidence that clears the floor;
+    the count of recovered array elements is the recoverability signal."""
     kind = salvaged.get("kind") if isinstance(salvaged, dict) else None
     struct = salvaged.get("struct") if isinstance(salvaged, dict) else None
     counts = ""
@@ -368,6 +367,69 @@ def _warn_salvage(stage: str, salvaged: Any) -> None:
     sys.stderr.write(
         f"model_clients: salvaged truncated JSON (stage={stage} kind={kind}"
         f"{counts}); confidence {conf_note}\n"
+    )
+
+
+# ── Salvage over-generation guard (R3 fail-closed, 2026-06-21) ───────────────
+# A truncated reply that salvages into an implausibly large/asymmetric graph, or
+# whose node ids are a sequential placeholder run (Q2273, Q2274, …), is model
+# OVER-GENERATION (hallucinated structure), not real data — drop it. The #49
+# salvage guarantees JSON STRUCTURE only; it cannot tell real content from a
+# confident hallucination, so this guard closes that fail-closed hole. A healthy
+# figure fits well under MAX_COMPLETION_TOKENS, so these bounds only ever apply
+# to already-abnormal truncated output. (R3 V0–V3 2026-06-21: 174–198 nodes /
+# 0 edges, or 24 nodes / 169 edges with sequential "Q2273…" ids — all fabricated.)
+SALVAGE_MAX_NODES = 30  # real teaching diagrams sit well under this
+SALVAGE_MAX_EDGES = 40  # bounding nodes shifted over-gen to edges (V3) — bound both
+SALVAGE_SEQ_ID_RUN = 6  # >= this many consecutive <prefix><int> ids = placeholder
+
+
+def _has_sequential_id_run(ids: list[str], k: int) -> bool:
+    """True if any common-prefix group has >= k consecutive integer suffixes
+    (e.g. Q2273, Q2274, …, Q2278 = a fabricated sequential placeholder run)."""
+    groups: dict[str, list[int]] = {}
+    for raw in ids:
+        m = re.match(r"^(.*?)(\d+)$", raw)
+        if m:
+            groups.setdefault(m.group(1), []).append(int(m.group(2)))
+    for nums in groups.values():
+        ordered = sorted(set(nums))
+        run = best = 1
+        for a, b in zip(ordered, ordered[1:]):
+            run = run + 1 if b == a + 1 else 1
+            best = max(best, run)
+        if best >= k:
+            return True
+    return False
+
+
+def _salvage_looks_overgenerated(salvaged: Any) -> bool:
+    """Over-generation / hallucination signals on a SALVAGED diagram struct (R3).
+    True → caller drops the crop instead of resurrecting a hallucination. Scoped
+    to diagram nodes/edges (the demonstrated failure mode)."""
+    if not isinstance(salvaged, dict):
+        return False
+    struct = salvaged.get("struct")
+    if not isinstance(struct, dict):
+        return False
+    nodes = struct.get("nodes") if isinstance(struct.get("nodes"), list) else []
+    edges = struct.get("edges") if isinstance(struct.get("edges"), list) else []
+    if len(nodes) > SALVAGE_MAX_NODES or len(edges) > SALVAGE_MAX_EDGES:
+        return True
+    ids = [str(n.get("id")) for n in nodes if isinstance(n, dict) and n.get("id") is not None]
+    return _has_sequential_id_run(ids, SALVAGE_SEQ_ID_RUN)
+
+
+def _warn_overgen(stage: str, salvaged: Any) -> None:
+    """Stderr line marking a salvaged-but-DROPPED truncation: the recovered
+    struct tripped the over-generation guard (hallucination) → not returned."""
+    struct = salvaged.get("struct") if isinstance(salvaged, dict) else {}
+    struct = struct if isinstance(struct, dict) else {}
+    n = len(struct.get("nodes")) if isinstance(struct.get("nodes"), list) else 0
+    e = len(struct.get("edges")) if isinstance(struct.get("edges"), list) else 0
+    sys.stderr.write(
+        f"model_clients: salvaged truncation DROPPED as over-generation "
+        f"(stage={stage} nodes={n} edges={e}) — hallucinated structure, not real data\n"
     )
 
 
@@ -505,16 +567,23 @@ class VlmHttpClient:
             if finish_reason == FINISH_REASON_LENGTH:
                 salvaged = _salvage_truncated_json(text)
                 if salvaged is not None:
-                    try:
-                        result = parse(json.dumps(salvaged))
-                    except (ValueError, ValidationError):
-                        result = None
-                    if result is not None:
-                        _warn_salvage(stage, salvaged)
-                        return result
+                    if _salvage_looks_overgenerated(salvaged):
+                        # Structurally salvageable but the content is model
+                        # over-generation (R3): drop it — never resurrect a
+                        # hallucination (closes the #49 fail-closed hole).
+                        _warn_overgen(stage, salvaged)
+                    else:
+                        try:
+                            result = parse(json.dumps(salvaged))
+                        except (ValueError, ValidationError):
+                            result = None
+                        if result is not None:
+                            _warn_salvage(stage, salvaged)
+                            return result
                 raise VlmContractError(
                     "VLM output truncated (finish_reason=length) and not "
-                    f"salvageable into the contract: {first_error}",
+                    "salvageable into the contract (or salvage dropped as "
+                    f"over-generation): {first_error}",
                     stage=stage,
                 ) from first_error
             # Non-truncation parse/validation failure: ONE re-ask retry, then

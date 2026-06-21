@@ -126,12 +126,18 @@ def _diagram_struct_consistent(struct: dict | None) -> tuple[bool, str]:
     return True, ""
 
 # ── Mode B/C prompt contents (PR-F scope per CONTRACT §7; wire shape is §2.2) ─
+# Field order is {kind, confidence, struct}: confidence precedes the (large)
+# struct so that when a dense reply hits MAX_COMPLETION_TOKENS the truncation
+# lands inside struct and confidence still survives — letting the #49 salvage
+# carry a real confidence past the downstream floor (R3 V1 live finding,
+# 2026-06-21: confidence ABSENT→0.95 under reorder).
 CROP_CLASSIFY_PROMPT = (
     "You classify ONE cropped region from a knowledge-video frame. The "
     "detector decided WHERE; you decide WHAT — and CRITICALLY, whether it is a "
     "real quantitative figure at all. Reply with ONLY JSON, no prose: "
     '{"kind": "chart"|"diagram"|"table"|"equation"  '
     '|"handwriting"|"title"|"decoration"|"ui_badge"|"text"|"photo"|"none", '
+    '"confidence": <float 0..1>, '
     '"struct": <for kind=chart: {"chart_type": "line"|"bar"|"scatter", '
     '"axes": {"x": "", "y": ""}, '
     '"series": [{"name": "", "points": [{"x": 0, "y": 0}]}], '
@@ -140,7 +146,7 @@ CROP_CLASSIFY_PROMPT = (
     '"nodes": [{"id": "n1", "label": "short text", "group": "optional lane/layer"}], '
     '"edges": [{"from": "n1", "to": "n2", "style": "solid"|"dashed"}], '
     '"insight": "one sentence"}; '
-    'otherwise {}>, "confidence": <float 0..1>}. '
+    'otherwise {}>}. '
     "For kind=diagram: capture the boxes as nodes and the arrows as edges — "
     "every edge's from/to MUST reference a declared node id; pick the "
     "diagram_type that matches the layout (left→right steps=flow, hierarchy=tree, "
