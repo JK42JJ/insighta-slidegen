@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -73,6 +74,11 @@ ROUTING_TEMPERATURE = 0.0  # §2.1 — temperature 0 for ALL routing/classificat
 # reply with slack; a truncated runaway becomes a CONTRACT error, which the
 # per-crop skip absorbs. Tuning knob, not a secret.
 MAX_COMPLETION_TOKENS = 4096
+# OpenAI/vLLM finish_reason when generation hit max_tokens (= the output was
+# TRUNCATED, not a clean stop). A truncated reply is a distinct failure mode
+# from genuine non-JSON garbage: it warrants a fail-closed partial salvage of
+# the complete prefix, NOT a re-ask (which re-truncates identically). §2.1.
+FINISH_REASON_LENGTH = "length"
 # §1 topology: Qwen3-VL-8B is the contract serving model (vlm_router keeps its
 # own local-backend default; this applies to from_env() construction only).
 DEFAULT_VLM_MODEL = "qwen3-vl-8b-instruct"
@@ -295,6 +301,76 @@ def _loads_json(text: str) -> Any:
     return json.loads(cleaned)
 
 
+def _salvage_truncated_json(text: str) -> Any | None:
+    """Recover the largest VALID prefix of a TRUNCATED JSON document.
+
+    Fail-closed (ADR 0003 D3): only complete, already-emitted elements are
+    kept. The incomplete trailing token is discarded and the still-open
+    containers are closed around what remains — no value is invented or
+    interpolated. Cut points are restricted to positions right after a closed
+    ``}``/``]`` (a complete object/array element), so a half-written object or
+    a possibly-truncated bare scalar (e.g. a number cut mid-digits) is never
+    admitted. ``"``/``]``/``}`` inside string literals are ignored (escape
+    aware). Returns the parsed object/array, or None when nothing complete can
+    be recovered (caller then drops the crop — never a silent total skip).
+    """
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", cleaned).strip()
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    best_cut = -1
+    best_stack: list[str] = []
+    for i, ch in enumerate(cleaned):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if not stack:
+                break  # malformed nesting — keep the best boundary so far
+            stack.pop()
+            best_cut = i + 1  # boundary just after a complete element
+            best_stack = stack.copy()  # containers still open at that boundary
+    if best_cut == -1:
+        return None
+    closers = "".join("}" if c == "{" else "]" for c in reversed(best_stack))
+    try:
+        return json.loads(cleaned[:best_cut] + closers)
+    except ValueError:
+        return None
+
+
+def _warn_salvage(stage: str, salvaged: Any) -> None:
+    """Emit a non-fatal stderr line marking a SALVAGED truncation (distinct
+    from a skip). Confidence is the LAST contract field, so a current-prompt
+    truncation drops it (defaults 0.0) and the crop still fails the downstream
+    confidence floor — the Phase-2 prompt reorder is what makes salvage pay
+    off. The count of recovered array elements is the recoverability signal."""
+    kind = salvaged.get("kind") if isinstance(salvaged, dict) else None
+    struct = salvaged.get("struct") if isinstance(salvaged, dict) else None
+    counts = ""
+    if isinstance(struct, dict):
+        sized = [f"{k}={len(v)}" for k, v in struct.items() if isinstance(v, list)]
+        if sized:
+            counts = " " + " ".join(sized)
+    has_conf = isinstance(salvaged, dict) and "confidence" in salvaged
+    conf_note = "present" if has_conf else "absent→0.0 (will fail conf floor)"
+    sys.stderr.write(
+        f"model_clients: salvaged truncated JSON (stage={stage} kind={kind}"
+        f"{counts}); confidence {conf_note}\n"
+    )
+
+
 # ── Qwen3-VL client (§2) ─────────────────────────────────────────────────────
 class VlmHttpClient:
     """Qwen3-VL behind vLLM — OpenAI-compatible chat.completions (§2).
@@ -417,16 +493,37 @@ class VlmHttpClient:
         self, parts: list[dict], *, stage: str, parse: Callable[[str], Any]
     ) -> Any:
         messages = [{"role": "user", "content": parts}]
-        text = self._completion_text(messages, stage=stage)
+        text, finish_reason = self._completion_text(messages, stage=stage)
         try:
             return parse(text)
         except (ValueError, ValidationError) as first_error:
-            # ONE re-ask retry on parse/validation failure, then hard error (§2.1).
+            # Truncation (max_tokens hit → finish_reason == "length") is NOT a
+            # re-ask candidate: a re-ask re-truncates identically (1080p cycle,
+            # 2026-06-13). Attempt a fail-closed salvage of the complete prefix
+            # instead; if nothing complete can be recovered, the crop is
+            # dropped (caller skip) — never a silent total loss.
+            if finish_reason == FINISH_REASON_LENGTH:
+                salvaged = _salvage_truncated_json(text)
+                if salvaged is not None:
+                    try:
+                        result = parse(json.dumps(salvaged))
+                    except (ValueError, ValidationError):
+                        result = None
+                    if result is not None:
+                        _warn_salvage(stage, salvaged)
+                        return result
+                raise VlmContractError(
+                    "VLM output truncated (finish_reason=length) and not "
+                    f"salvageable into the contract: {first_error}",
+                    stage=stage,
+                ) from first_error
+            # Non-truncation parse/validation failure: ONE re-ask retry, then
+            # hard error (§2.1).
             reask_messages = messages + [
                 {"role": "assistant", "content": text},
                 {"role": "user", "content": REASK_PROMPT},
             ]
-            reask_text = self._completion_text(reask_messages, stage=stage)
+            reask_text, _ = self._completion_text(reask_messages, stage=stage)
             try:
                 return parse(reask_text)
             except (ValueError, ValidationError) as second_error:
@@ -435,7 +532,9 @@ class VlmHttpClient:
                     stage=stage,
                 ) from first_error
 
-    def _completion_text(self, messages: list[dict], *, stage: str) -> str:
+    def _completion_text(
+        self, messages: list[dict], *, stage: str
+    ) -> tuple[str, str | None]:
         payload = {
             "model": self.model,
             "temperature": ROUTING_TEMPERATURE,  # §2.1 — always 0
@@ -456,7 +555,8 @@ class VlmHttpClient:
         )
         data = response.json()
         try:
-            content = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            content = choice["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise VlmContractError(
                 f"malformed chat.completions envelope: {exc}", stage=stage
@@ -465,7 +565,8 @@ class VlmHttpClient:
             raise VlmContractError(
                 "chat.completions message content was not a string", stage=stage
             )
-        return content
+        finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+        return content, finish_reason
 
 
 # ── DocLayout-YOLO client (§3) ───────────────────────────────────────────────

@@ -214,6 +214,125 @@ def test_code_fenced_json_is_tolerated():
     assert len(stub.requests) == 1  # no re-ask needed
 
 
+# ── R3 — truncated output (finish_reason=length) → fail-closed partial salvage ─
+# A dense diagram can overflow MAX_COMPLETION_TOKENS; the reply is then cut
+# mid-JSON. Before R3 the whole crop was dropped silently. Now the complete
+# prefix is salvaged (complete nodes/edges only), the incomplete tail is
+# discarded, and NO re-ask is issued (a re-ask re-truncates identically).
+
+# A diagram reply cut off mid-way through the THIRD node — the first two nodes
+# are complete, the trailing `{"id":"n3","lab` is incomplete, and confidence
+# (the last field) never made it out.
+_TRUNCATED_DIAGRAM = (
+    '{"kind":"diagram","struct":{"diagram_type":"layered",'
+    '"nodes":[{"id":"n1","label":"입력"},{"id":"n2","label":"은닉"},{"id":"n3","lab'
+)
+
+
+def test_truncated_diagram_is_salvaged_not_dropped():
+    stub = VlmStub()
+    stub.script_truncated(_TRUNCATED_DIAGRAM)
+    client = make_vlm_client(stub)
+    out = client.classify_crop(IMG, "classify this crop")
+    assert out["kind"] == "diagram"
+    # the two COMPLETE nodes survive; the partial third is discarded
+    assert [n["id"] for n in out["struct"]["nodes"]] == ["n1", "n2"]
+    assert "n3" not in json.dumps(out, ensure_ascii=False)  # no invented tail
+    assert out["struct"]["diagram_type"] == "layered"
+
+
+def test_truncation_skips_the_reask():
+    """A re-ask just re-truncates — the salvage path must NOT issue one."""
+    stub = VlmStub()
+    stub.script_truncated(_TRUNCATED_DIAGRAM)
+    client = make_vlm_client(stub)
+    client.classify_crop(IMG, "classify this crop")
+    assert len(stub.requests) == 1  # salvage, no re-ask
+
+
+def test_salvaged_truncation_has_absent_confidence_defaulted():
+    """fail-closed (decision c): confidence was truncated away → defaults 0.0,
+    so the crop still fails the downstream confidence floor (no fabrication)."""
+    stub = VlmStub()
+    stub.script_truncated(_TRUNCATED_DIAGRAM)
+    client = make_vlm_client(stub)
+    assert client.classify_crop(IMG, "classify this crop")["confidence"] == 0.0
+
+
+def test_truncated_unsalvageable_is_contract_error():
+    """No complete element boundary (cut inside the first node) → drop, never a
+    silent success. One request (truncation skips the re-ask)."""
+    from model_clients import STAGE_RECOGNIZE, VlmContractError
+
+    stub = VlmStub()
+    stub.script_truncated('{"kind":"diagram","struct":{"nodes":[{"id":"n1"')
+    client = make_vlm_client(stub)
+    with pytest.raises(VlmContractError) as excinfo:
+        client.classify_crop(IMG, "classify this crop")
+    assert excinfo.value.stage == STAGE_RECOGNIZE
+    assert len(stub.requests) == 1  # no re-ask on truncation
+
+
+def test_non_truncation_garbage_still_reasks_then_errors():
+    """finish_reason=="stop" + bad JSON is genuine garbage, not truncation —
+    the existing ONE re-ask path is preserved (2 requests)."""
+    from model_clients import VlmContractError
+
+    stub = VlmStub()
+    stub.script_content("not json", "still not json")  # default finish_reason "stop"
+    client = make_vlm_client(stub)
+    with pytest.raises(VlmContractError):
+        client.classify_crop(IMG, "classify this crop")
+    assert len(stub.requests) == 2  # exactly ONE re-ask, then hard error
+
+
+# ── R3 — _salvage_truncated_json unit cases (deterministic, no VLM) ───────────
+
+
+def test_salvage_keeps_complete_array_elements():
+    from model_clients import _salvage_truncated_json
+
+    assert _salvage_truncated_json('{"a":[{"x":1},{"x":2},{"x":') == {
+        "a": [{"x": 1}, {"x": 2}]
+    }
+
+
+def test_salvage_tolerates_trailing_comma():
+    from model_clients import _salvage_truncated_json
+
+    assert _salvage_truncated_json('{"a":[{"x":1},{"x":2},') == {"a": [{"x": 1}, {"x": 2}]}
+
+
+def test_salvage_ignores_brackets_inside_strings():
+    from model_clients import _salvage_truncated_json
+
+    # the "]}" and "{" inside the label must not be read as structure
+    assert _salvage_truncated_json('{"a":[{"label":"b]c}d"},{"label":"e') == {
+        "a": [{"label": "b]c}d"}]
+    }
+
+
+def test_salvage_is_escape_aware():
+    from model_clients import _salvage_truncated_json
+
+    assert _salvage_truncated_json('{"a":[{"v":"x\\"y"},{"v":"z') == {"a": [{"v": 'x"y'}]}
+
+
+def test_salvage_recovers_nested_points():
+    from model_clients import _salvage_truncated_json
+
+    out = _salvage_truncated_json(
+        '{"series":[{"name":"s","points":[{"x":0,"y":0},{"x":1,"y":1}]},{"name":"t'
+    )
+    assert out == {"series": [{"name": "s", "points": [{"x": 0, "y": 0}, {"x": 1, "y": 1}]}]}
+
+
+def test_salvage_returns_none_when_no_complete_boundary():
+    from model_clients import _salvage_truncated_json
+
+    assert _salvage_truncated_json('{"kind":"diagram","struct":{"nodes":[{"id":"n1') is None
+
+
 # ── §2.3 — retry/backoff + failure attribution ───────────────────────────────
 
 
