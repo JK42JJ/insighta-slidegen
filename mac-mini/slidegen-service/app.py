@@ -151,6 +151,37 @@ class ResultResponse(BaseModel):
 
 
 # ----------------------------------------------------------------
+# ⑤ get-or-extract COMPUTE contract (insighta numerize-client calls this)
+# ----------------------------------------------------------------
+
+# ± window (sec) acquired around each requested timestamp for the figure scan.
+NUMERIZE_WINDOW_SEC = 10.0
+
+
+class NumerizeRequest(BaseModel):
+    """insighta ⑤ numerize-client request: figure data for a video at timestamps."""
+
+    video_id: str
+    ts: list[int]
+    mode: str = "prod"
+
+
+class NumerizeFigure(BaseModel):
+    """One extracted figure's DATA (not a rendered asset) — the ⑤ cache row shape."""
+
+    kind: str
+    ts_sec: int | None = None
+    struct: dict | None = None
+    latex: str | None = None
+    asset_path: str | None = None
+    verification_status: str = "pending"
+
+
+class NumerizeResponse(BaseModel):
+    figures: list[NumerizeFigure]
+
+
+# ----------------------------------------------------------------
 # Endpoints
 # ----------------------------------------------------------------
 
@@ -216,6 +247,55 @@ def slides_result(job_id: str) -> ResultResponse:
         figures=[FigureResult(**f) for f in job["figures"]],
         keyframe_count=job["keyframe_count"],
         resources=job.get("resources", {}),
+    )
+
+
+@app.post("/numerize", response_model=NumerizeResponse)
+def numerize(req: NumerizeRequest) -> NumerizeResponse:
+    """⑤ get-or-extract COMPUTE: {video_id, ts:[]} → figures with struct/latex.
+
+    Synchronous adapter for the insighta ⑤ contract. Acquires a short window
+    around each ts, then runs the SAME CV pipeline as /slides/generate
+    (acquire → frames → preselect → select → YOLO + Qwen numerize) and returns
+    per-figure EXTRACTED DATA (struct / latex). insighta ⑤ persists these to its
+    video_figure_snapshots cache — slidegen never writes that table (slide_* only).
+    Fail-closed: figure_extract's gates drop non-figures, so only real figures
+    (chart/diagram/table/equation/keyframe) are returned; nothing is fabricated.
+    """
+    if req.mode == "prod" and SLIDEGEN_MODE == "dev":
+        raise HTTPException(
+            status_code=400, detail="Vision API disabled in dev mode (SLIDEGEN_MODE=dev)"
+        )
+    sections = [
+        {
+            "index": i,
+            "from_sec": max(0.0, float(t) - NUMERIZE_WINDOW_SEC),
+            "to_sec": float(t) + NUMERIZE_WINDOW_SEC,
+        }
+        for i, t in enumerate(req.ts)
+    ]
+    frames_dir = download_frames(req.video_id, sections)
+    candidates = extract_candidates(frames_dir / "video.mp4")
+    yolo, vlm = _build_extraction_clients()
+    gated = preselect_candidates(candidates, yolo=yolo)
+    candidates = gated if gated else candidates
+    topic_points = detect_topic_changes(req.video_id, req.mode)
+    selected = select_keyframes(
+        candidates, topic_points, req.mode, sections=sections, youtube_video_id=req.video_id
+    )
+    figures = cv_extract_figures(selected, yolo=yolo, vlm=vlm, out_dir=frames_dir / "crops")
+    return NumerizeResponse(
+        figures=[
+            NumerizeFigure(
+                kind=f.kind,
+                ts_sec=f.timestamp_sec,
+                struct=f.struct,
+                latex=f.extracted_latex,
+                asset_path=f.png_path,
+                verification_status=f.verification_status,
+            )
+            for f in figures
+        ]
     )
 
 
