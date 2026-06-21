@@ -32,6 +32,7 @@ job store until done or error.
 from __future__ import annotations
 
 import os
+import sys
 import uuid
 from typing import Any
 
@@ -40,6 +41,7 @@ from pydantic import BaseModel, Field
 
 from acquire import download_frames
 from frames import extract_candidates
+from preselect import preselect_candidates
 from captions import detect_topic_changes
 from typing_select import select_keyframes
 from figure_extract import ExtractedFigure, extract_figures as cv_extract_figures
@@ -357,6 +359,23 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
         candidates = extract_candidates(video_path)
         _jobs[job_id]["progress_pct"] = 30.0
 
+        # Step 2b: preselect (cheap content-box prefilter, select-before-extract).
+        # Drop candidates with NO real slide content via a cheap DocLayout-YOLO
+        # pass BEFORE the (expensive) VLM router, so it runs on fewer frames.
+        # Reuses the SAME yolo client as figure_extract (built once here). Stage
+        # stays "keyframe". Recall-first starve-guard: if the gate would empty the
+        # set (e.g. a detector failure storm), keep all candidates and let the VLM
+        # router decide. The content-box gate has no person sub-gate (no detector
+        # in this service); the VLM router makes the person-vs-slide fine call.
+        yolo, vlm = _build_extraction_clients()
+        before = len(candidates)
+        gated = preselect_candidates(candidates, yolo=yolo)
+        candidates = gated if gated else candidates
+        sys.stderr.write(
+            f"preselect: {before} -> {len(candidates)} candidates "
+            f"({before - len(candidates)} dropped)\n"
+        )
+
         # Step 3: captions (45%) — BGE-M3 topic-change detection
         topic_points = detect_topic_changes(req.youtube_video_id, req.mode)
         _jobs[job_id]["progress_pct"] = 45.0
@@ -379,9 +398,8 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
         _jobs[job_id]["stage"] = stage
 
         # Step 5: figure_extract (80%) — YOLO crop + Qwen numerization on the
-        # selected frames only. Clients are env-gated (http opt-in → live
-        # contract endpoints; default → in-service mocks).
-        yolo, vlm = _build_extraction_clients()
+        # selected frames only. Reuses the yolo+vlm clients built at step 2b
+        # (env-gated: http opt-in → live contract endpoints; default → mocks).
         figures = cv_extract_figures(
             selected, yolo=yolo, vlm=vlm, out_dir=frames_dir / "crops"
         )
