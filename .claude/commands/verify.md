@@ -36,10 +36,13 @@ Classify (a change set can match several):
 
 ```bash
 npm run typecheck        # tsc --noEmit (strict)
+npm run lint             # eslint (.eslintrc prettier/prettier:error catches prettier too) — mirrors CI's lint job (PR #41)
 npm run test             # vitest
 npm run build            # tsc build
 ```
 All must exit 0.
+
+> **`npm run lint` only — `format:check` is intentionally excluded (CI-mirror principle).** CI's lint job runs `npm run lint` and nothing else; the `prettier/prettier: error` rule in `.eslintrc.json` makes eslint flag prettier diffs inside that one command. Adding a separate `npm run format:check` here would diverge local `/verify` from CI again (the exact PR #41 round-trip this gate exists to prevent).
 
 #### 2b. Python checks (PYTHON scope)
 
@@ -151,6 +154,7 @@ echo "PASS $(date +%s) $(git rev-parse HEAD)" > /tmp/.slidegen-verify-pass
 | Check | Result | Duration |
 |-------|--------|----------|
 | tsc --noEmit (strict) | {PASS/FAIL/SKIP} | {N}s |
+| eslint + prettier (npm run lint) | {PASS/FAIL/SKIP} | {N}s |
 | vitest | {PASS/FAIL/SKIP} | {N}s |
 | tsc build | {PASS/FAIL/SKIP} | {N}s |
 | ruff | {PASS/FAIL/SKIP} | {N}s |
