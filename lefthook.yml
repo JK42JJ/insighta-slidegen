@@ -11,17 +11,8 @@ pre-push:
   parallel: false
   commands:
     stay-current:
-      run: |
-        git fetch origin --quiet 2>/dev/null || true
-        BEHIND=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
-        BR=$(git branch --show-current)
-        if [ "${BEHIND:-0}" -gt 0 ]; then
-          if [ "$BR" = "main" ]; then
-            echo "🚫 push blocked — local main is ${BEHIND} commit(s) behind origin/main."
-            echo "   Run: git pull --ff-only origin main   then push again."
-            exit 1
-          else
-            echo "⚠️ '${BR}' is ${BEHIND} commit(s) behind origin/main — rebase before opening/updating the PR"
-            echo "   (merge requires the branch to be up to date)."
-          fi
-        fi
+      # Script lives in a file (not an inline `run: |`) because lefthook wraps an
+      # inline block as `sh -c "<script>"`, and on Windows Git-Bash the echo lines'
+      # double quotes collide with that outer quoting → "syntax error: unexpected
+      # end of file" (the push aborts even when the branch is up to date).
+      run: sh scripts/hooks/stay-current.sh
