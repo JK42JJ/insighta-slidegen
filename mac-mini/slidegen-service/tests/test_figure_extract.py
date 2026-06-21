@@ -454,3 +454,15 @@ def test_gate_valid_diagram_passes(tmp_path):
     }))
     figs = run_extract([make_frame(tmp_path, contains_graph=True)], yolo, vlm, tmp_path, self_consistency=False)
     assert len(figs) == 1 and figs[0].kind == "diagram"
+
+
+# ── R3 reorder — confidence must precede struct in the prompt ─────────────────
+
+
+def test_crop_prompt_emits_confidence_before_struct():
+    """R3 reorder: confidence is specified before the (large) struct so a
+    truncated dense reply still carries confidence (figure_extract reorder)."""
+    from figure_extract import CROP_CLASSIFY_PROMPT as p
+
+    assert '"confidence"' in p and '"struct"' in p
+    assert p.index('"confidence"') < p.index('"struct"')
