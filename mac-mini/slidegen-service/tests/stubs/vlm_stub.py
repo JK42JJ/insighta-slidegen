@@ -29,6 +29,14 @@ class _StatusStep:
 
 
 @dataclass
+class _ContentStep:
+    """A 200 reply with an explicit finish_reason (e.g. "length" = truncated)."""
+
+    content: str
+    finish_reason: str = "stop"
+
+
+@dataclass
 class VlmStub:
     """Scriptable in-process vLLM stub.
 
@@ -44,6 +52,12 @@ class VlmStub:
 
     def script_content(self, *contents: str) -> None:
         self._script.extend(contents)
+
+    def script_truncated(self, *contents: str) -> None:
+        """Queue 200 replies that hit the max_tokens ceiling — finish_reason
+        "length" (the truncation signal §2.1). The content is returned as-is
+        (typically a deliberately cut-off JSON string for salvage tests)."""
+        self._script.extend(_ContentStep(c, finish_reason="length") for c in contents)
 
     def script_status(self, status: int, body: dict | None = None) -> None:
         if body is None:
@@ -87,9 +101,13 @@ class VlmStub:
         step = self._script.pop(0) if self._script else "[]"
         if isinstance(step, _StatusStep):
             return httpx.Response(step.status, json=step.body)
+        if isinstance(step, _ContentStep):
+            return httpx.Response(
+                200, json=self._completion(step.content, finish_reason=step.finish_reason)
+            )
         return httpx.Response(200, json=self._completion(step))
 
-    def _completion(self, content: str) -> dict:
+    def _completion(self, content: str, finish_reason: str = "stop") -> dict:
         """A minimal-but-complete OpenAI chat.completion envelope."""
         return {
             "id": "chatcmpl-stub-0001",
@@ -100,7 +118,7 @@ class VlmStub:
                 {
                     "index": 0,
                     "message": {"role": "assistant", "content": content},
-                    "finish_reason": "stop",
+                    "finish_reason": finish_reason,
                 }
             ],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
