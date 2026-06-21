@@ -79,6 +79,7 @@ describe('⑥ e2e — book-index → OrchestrateResources → .pptx (stub llm, r
 
       expect(result.ok).toBe(true);
       expect(fs.existsSync(outPath)).toBe(true); // book-index → .pptx falls out
+      expect(fs.statSync(outPath).size).toBeGreaterThan(0); // real bytes, not an empty file
     }
   );
 });
