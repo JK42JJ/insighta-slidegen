@@ -124,6 +124,9 @@ class FrameCandidate:
     is_scene_boundary: bool       # True if this frame sits on a PySceneDetect cut
     t_start: float = field(default=-1.0)
     t_end: float = field(default=-1.0)
+    # figure-bearing YOLO box count, set by preselect_candidates; numerize ranks
+    # in-window frames by this (figure frames over text/title). Default 0.
+    fig_box_count: int = field(default=0)
 
     def __post_init__(self) -> None:
         if self.t_start < 0:

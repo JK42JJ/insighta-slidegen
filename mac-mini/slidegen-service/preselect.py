@@ -57,6 +57,11 @@ KIND_MAP = {
 }
 DROP_CLASSES = frozenset({"abandon"})
 TEXTUAL_KINDS = frozenset({"equation", "table", "text"})
+# figure-bearing kinds for frame RANKING (numerize select): YOLO advisory boxes
+# whose _kind() is a figure (table/diagram/equation), NOT plain text/title. Used to
+# rank in-window frames by figure content so numerize picks figure frames, not the
+# chronological first-N (which were section-intro text/title slides → kind=text → 0).
+FIGURE_KINDS = frozenset({"diagram", "table", "equation"})
 
 # A figure at/above this confidence is a trusted real slide region (chart /
 # diagram / portrait) — distinguishes a real figure slide from a low-confidence
@@ -151,5 +156,10 @@ def preselect_candidates(
             continue
         frame_area = float(detection.image.w) * float(detection.image.h)
         if frame_area <= 0 or has_real_content(detection.boxes, frame_area):
+            # Attach figure-box count (reuses this frame's YOLO result — no extra
+            # detect) so numerize can rank figure frames over text frames.
+            cand.fig_box_count = sum(
+                1 for kind, _, _ in _content_boxes(detection.boxes) if kind in FIGURE_KINDS
+            )
             kept.append(cand)
     return kept
