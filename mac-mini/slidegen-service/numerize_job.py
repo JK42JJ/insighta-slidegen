@@ -54,7 +54,13 @@ def run_numerize(job_id: str, req: NumerizeJobRequest, build_clients, cv_extract
         candidates = gated if gated else candidates
         windows = [(s["from_sec"], s["to_sec"]) for s in sections]
         in_window = [c for c in candidates if any(lo <= c.timestamp_sec <= hi for lo, hi in windows)]
-        candidates = (in_window or candidates)[:NUMERIZE_MAX_FRAMES]
+        # Figure-RANKED pick (not chronological first-N) — rank by figure-box count
+        # (preselect-attached, same YOLO pass), ts asc tiebreak. Surfaces figure
+        # frames over section-intro text/title slides. (mirrors app.py numerize)
+        candidates = sorted(
+            (in_window or candidates),
+            key=lambda c: (-getattr(c, "fig_box_count", 0), c.timestamp_sec),
+        )[:NUMERIZE_MAX_FRAMES]
 
         job.update(stage="cv_extract", progress_pct=40.0)
         selected = [

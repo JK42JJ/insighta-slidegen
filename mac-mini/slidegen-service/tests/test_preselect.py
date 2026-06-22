@@ -123,3 +123,35 @@ def test_preselect_keeps_on_detect_error(tmp_path: Path) -> None:
 
 def test_preselect_empty_input() -> None:
     assert preselect_candidates([], yolo=_FakeYolo([])) == []
+
+
+# ── figure-ranked frame selection (numerize: first-N → figure-count) ──────────
+
+
+def test_preselect_attaches_fig_box_count(tmp_path: Path) -> None:
+    """preselect tags each kept frame with its figure-box count (reusing the same
+    YOLO pass) so numerize can rank figure frames over text/title frames."""
+    cands = [_candidate(tmp_path, "figs", 10.0), _candidate(tmp_path, "txt", 20.0)]
+    yolo = _FakeYolo([
+        _resp([_box("figure", 400, 400, 0.9), _box("table", 300, 300, 0.9)]),  # 2 figure boxes
+        _resp([_box("plain text", 300, 200, 0.5)]),                            # 0 figure boxes
+    ])
+    kept = preselect_candidates(cands, yolo=yolo)
+    by_name = {c.path.stem: c for c in kept}
+    assert by_name["figs"].fig_box_count == 2
+    assert by_name["txt"].fig_box_count == 0
+
+
+def test_figure_rank_beats_chronological_first_n(tmp_path: Path) -> None:
+    """Regression: an early section-intro TEXT slide must not be picked over a
+    later FIGURE slide. numerize ranks by (-fig_box_count, ts) — the figure frame
+    wins despite its later timestamp (the first-N bug picked the text intro → 0)."""
+    text_cand = _candidate(tmp_path, "intro_text", 5.0)   # earlier
+    fig_cand = _candidate(tmp_path, "figure_slide", 30.0)  # later, but a figure
+    yolo = _FakeYolo([
+        _resp([_box("plain text", 400, 300, 0.6)]),  # text → fig_box_count 0
+        _resp([_box("figure", 500, 400, 0.9)]),      # figure → fig_box_count 1
+    ])
+    kept = preselect_candidates([text_cand, fig_cand], yolo=yolo)
+    ranked = sorted(kept, key=lambda c: (-c.fig_box_count, c.timestamp_sec))
+    assert ranked[0].path.stem == "figure_slide"  # figure wins, not chronological first
