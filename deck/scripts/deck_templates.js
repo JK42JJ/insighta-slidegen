@@ -132,6 +132,28 @@ function makeTemplates(D, opts = {}) {
       table(s, { x: MX, y, w, headers, rows, cat, colW: cw, fontSize: 11.5, rowH });
       footer(s, page, total); return s;
     },
+    /* 섹션 본문: atoms[]를 불릿으로 펼친다 — 2단, stripe 없음, full text 자동
+       줄바꿈(clip 금지). 페이지네이션은 호출측이 슬라이드당 N개로 잘라 호출.
+       figure 슬롯 의존 없이 본문만으로 분량·깊이를 채운다(atoms = 1차 소스). */
+    sectionBody({ kicker, title, cat = "blue", bullets = [], note }) {
+      page++; const s = newSlide(); const C = BRAND.cats[cat];
+      // 자체 헤더: kicker(작은 라벨) + 섹션 제목을 줄바꿈 헤드라인으로(clip 없이
+      // full, header()의 1줄 박스 대신 2-3줄 허용 → 긴 섹션 제목 truncate/overflow 방지).
+      if (kicker) s.addText(String(kicker).toUpperCase(), { x: MX, y: 0.5, w: CW, h: 0.26, fontFace: BRAND.font.mono, fontSize: 10.5, bold: true, color: C.c, charSpacing: 2, margin: 0 });
+      s.addText(title, { x: MX, y: 0.8, w: CW, h: 0.92, fontFace: BRAND.font.display, fontSize: 19, bold: true, color: BRAND.text, valign: "top", lineSpacingMultiple: 1.02, margin: 0 });
+      const list = (bullets.length ? bullets : [note || ""]).filter(Boolean);
+      const n = list.length || 1, twoCol = n > 4, gap = 0.5;
+      const colW = twoCol ? (CW - gap) / 2 : CW, perCol = twoCol ? Math.ceil(n / 2) : n;
+      const top = 1.95, bandH = note && bullets.length ? 4.4 : 4.9, rowH = bandH / perCol;
+      list.forEach((b, i) => {
+        const col = twoCol && i >= perCol ? 1 : 0, row = twoCol ? i % perCol : i;
+        const x = MX + col * (colW + gap), y = top + row * rowH;
+        s.addShape(shapes.OVAL, { x, y: y + 0.08, w: 0.11, h: 0.11, fill: { color: C.c }, line: { type: "none" } });
+        s.addText(b, { x: x + 0.24, y, w: colW - 0.28, h: rowH - 0.06, fontFace: BRAND.font.body, fontSize: 12, color: BRAND.text, valign: "top", lineSpacingMultiple: 1.04, margin: 0 });
+      });
+      if (note && bullets.length) s.addText(note, { x: MX, y: 6.6, w: CW, h: 0.3, fontFace: BRAND.font.body, fontSize: 10, italic: true, color: BRAND.muted, align: "center", margin: 0 });
+      footer(s, page, total); return s;
+    },
     /* 두 그래프 + 설명 카드 2개 */
     dualTeach({ kicker, title, cat, figures, notes }) {
       page++; const s = newSlide(); header(s, { kicker, title, cat });
