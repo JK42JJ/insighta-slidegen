@@ -21,8 +21,11 @@ const asArr = (v) => (Array.isArray(v) ? v : []);
 // 결정성 provenance 제거: 소스 narrative의 "이 영상에서는/본 강의/강사/채널 구독"
 // 같은 출처·메타 구문을 덱에 넣기 전에 제거(주제 어휘 "영상 제작"은 보존).
 const PROV = /(?:이|본|그)\s*영상[^\s,.]*[\s,]*|영상\s*에서[^\s,.]*[\s,]*|본\s*강의[^\s,.]*[\s,]*|강사님?[^\s,.]*[\s,]*|채널\s*구독[^\s,.]*\s*|구독.{0,8}좋아요\s*/g;
-const str = (v) => (typeof v === "string" ? v.replace(PROV, "").replace(/\s{2,}/g, " ").trim() : "");
-const clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+// NFC 정규화로 한글 음절을 단일 코드포인트로 합침 → clip이 자모 중간을 자르지 않음.
+const str = (v) => (typeof v === "string" ? v.normalize("NFC").replace(PROV, "").replace(/\s{2,}/g, " ").trim() : "");
+// 라벨용 단축 — "…" ellipsis 없이 단어 경계에서 자른다(truncate 흔적 0).
+// 본문(atoms)은 clip을 쓰지 않고 full text로 렌더한다.
+const clip = (s, n) => { s = String(s); if (s.length <= n) return s; const cut = s.slice(0, n); const sp = cut.lastIndexOf(" "); return (sp > n * 0.6 ? cut.slice(0, sp) : cut).trim(); };
 
 /* diagram/chart struct → 재작도 PNG (deck_tools). 실패 시 null(fail-closed). */
 function renderFigure(struct, kind, figId, figDir) {
@@ -65,43 +68,67 @@ function buildDeck(book, figures, outPath) {
   });
   prog(75, "assemble");
 
-  // 슬라이드 수 계산(total 정확)
-  const chapSlides = chapters.length;
-  const total = 1 /*title*/ + 1 /*roadmap*/ + 1 /*conceptMap*/ + chapSlides + tables.length + diagrams.length + 1 /*essence*/ + 1 /*curiosity*/;
+  // 본문 페이지: 각 섹션 atoms[]를 슬라이드당 N개로 페이지네이션(figure 의존 없음,
+  // clip 없이 full text). atoms 없으면 narrative/ title로 fallback(fail-closed).
+  const ATOMS_PER_SLIDE = 6;
+  const FEW = chapters.length < 3; // 소수 챕터 → roadmapLoop/conceptMap/essenceLoop 붕괴 방지
+  const bodyPages = [];
+  chapters.forEach((c, ci) => {
+    asArr(c.sections).forEach((sec) => {
+      let src = asArr(sec.atoms).map((a) => str(a.text)).filter(Boolean);
+      if (!src.length) src = [str(sec.narrative)].filter(Boolean);
+      if (!src.length) src = [str(sec.title) || "—"];
+      const nP = Math.max(1, Math.ceil(src.length / ATOMS_PER_SLIDE));
+      const per = Math.ceil(src.length / nP); // 균등 분배 — 마지막 orphan(얇은) 페이지 방지
+      const narrSents = str(sec.narrative).split(/(?<=[.!?…다])\s+/).map((x) => x.trim()).filter((x) => x.length > 12);
+      for (let pi = 0; pi < nP; pi++) {
+        const pg = src.slice(pi * per, (pi + 1) * per);
+        // 저밀도 방지: 얇은 페이지를 narrative 문장으로 보강(중복 제외, truncate 없이 full 문장).
+        for (let k = 0; pg.reduce((n, t) => n + t.length, 0) < 150 && k < narrSents.length; k++) {
+          if (!pg.includes(narrSents[k]) && !src.includes(narrSents[k])) pg.push(narrSents[k]);
+        }
+        if (!pg.length) continue;
+        bodyPages.push({
+          kicker: clip(str(c.title) || "주제", 40),
+          title: (str(sec.title) || "—") + (nP > 1 ? ` (${pi + 1}/${nP})` : ""), // full, clip 없음
+          cat: CATS[ci % CATS.length], bullets: pg,
+        });
+      }
+    });
+  });
+
+  const secTotal = chapters.reduce((n, c) => n + asArr(c.sections).length, 0);
+  const total = 1 /*title*/ + (FEW ? 0 : 2) /*roadmap+concept*/ + bodyPages.length
+    + tables.length + diagrams.length + (FEW ? 0 : 1) /*essence*/ + 1 /*curiosity*/;
   const D = createDeck({ title, footer: title });
   const T = makeTemplates(D, { total, figDir, link: "https://insighta.one" });
 
   T.title({
     kicker: "INSIGHTA · 만다라", title: clip(title, 40),
     subtitle: clip(firstNarr || "여러 영상을 한 흐름으로 종합한 학습 덱", 70),
-    pills: [["주제군", String(chapters.length)], ["영상", String(book.source_videos || asArr(book.chapters).reduce((n, c) => n + asArr(c.sections).length, 0))], ["구성", "개념지도+종합"]],
+    pills: [["주제군", String(chapters.length)], ["영상", String(book.source_videos || secTotal)], ["섹션", String(secTotal)]],
   });
 
-  T.roadmapLoop({
-    title: "큰 그림: 주제군들이 한 흐름으로",
-    intro: clip(firstNarr || "주제군들은 아래 흐름으로 이어진다.", 90),
-    stages: chapters.slice(0, 5).map((c) => ({ title: clip(str(c.title) || "", 10), sub: clip(str((asArr(c.sections)[0] || {}).title) || "", 12) })),
-    loopNote: "주제군을 차례로 익히면 전체 그림이 완성된다",
-    hooks: chapters.slice(0, 3).map((c) => ({ q: clip(str(c.title) || "주제", 26) + "?", a: clip(str((asArr(c.sections)[0] || {}).narrative) || "핵심을 탐구한다.", 70) })),
-  });
+  if (!FEW) {
+    T.roadmapLoop({
+      title: "큰 그림: 주제군들이 한 흐름으로",
+      intro: clip(firstNarr || "주제군들은 아래 흐름으로 이어진다.", 90),
+      stages: chapters.slice(0, 5).map((c) => ({ title: clip(str(c.title) || "", 10), sub: clip(str((asArr(c.sections)[0] || {}).title) || "", 12) })),
+      loopNote: "주제군을 차례로 익히면 전체 그림이 완성된다",
+      hooks: chapters.slice(0, 3).map((c) => ({ q: clip(str(c.title) || "주제", 26) + "?", a: clip(str((asArr(c.sections)[0] || {}).narrative) || "핵심을 탐구한다.", 70) })),
+    });
+    T.conceptMap({
+      title: "한눈에 보는 지도",
+      categories: chapters.slice(0, 6).map((c, i) => ({
+        cat: CATS[i % CATS.length], name: clip(str(c.title) || `주제 ${i + 1}`, 18),
+        count: asArr(c.sections).length,
+        concepts: asArr(c.sections).slice(0, 6).map((s) => clip(str(s.title) || "—", 22)),
+      })),
+    });
+  }
 
-  T.conceptMap({
-    title: "한눈에 보는 지도",
-    categories: chapters.slice(0, 6).map((c, i) => ({
-      cat: CATS[i % CATS.length], name: clip(str(c.title) || `주제 ${i + 1}`, 18),
-      count: asArr(c.sections).length,
-      concepts: asArr(c.sections).slice(0, 6).map((s) => clip(str(s.title) || "—", 22)),
-    })),
-  });
-
-  // 셀(주제군)마다 종합 슬라이드 — sections를 breadthGrid 항목으로(figure 없는 셀)
-  chapters.forEach((c, i) => {
-    const items = asArr(c.sections).slice(0, 6).map((s) => ({
-      term: clip(str(s.title) || "—", 26),
-      desc: clip(str(s.narrative) || str(s.summary) || "", 80),
-    }));
-    T.breadthGrid({ kicker: clip(str(c.title) || "주제", 20), title: clip(str(c.title) || `주제 ${i + 1}`, 30), cat: CATS[i % CATS.length], cols: items.length > 4 ? 3 : 2, items });
-  });
+  // 섹션 본문 — atoms를 sectionBody로 펼침(stripe 없음, full text, 페이지네이션)
+  bodyPages.forEach((pg) => T.sectionBody(pg));
 
   // 표 figure → 네이티브 비교표
   tables.forEach((f, i) => T.comparisonTable({
@@ -122,7 +149,7 @@ function buildDeck(book, figures, outPath) {
     });
   });
 
-  T.essenceLoop({
+  if (!FEW) T.essenceLoop({
     title: clip(`본질 — ${title}`, 44),
     stages: chapters.slice(0, 5).map((c) => ({ title: clip(str(c.title) || "", 10), sub: "" })),
     loopNote: "각 주제군이 한 흐름으로 이어진다",
