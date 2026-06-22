@@ -557,3 +557,12 @@ import numerize_job
 numerize_job.register(
     app, _build_extraction_clients, cv_extract_figures, StatusResponse, NumerizeFigure, SLIDEGEN_MODE
 )
+
+
+# ----------------------------------------------------------------
+# 덱 빌드 ASYNC JOB — book_json → .pptx (결정성 규칙 매퍼, LLM auto-route 0,
+# fail-closed). insighta D build-call의 타깃. build_deck_service.js를 subprocess.
+# ----------------------------------------------------------------
+import deck_build_job
+
+deck_build_job.register(app, StatusResponse)
