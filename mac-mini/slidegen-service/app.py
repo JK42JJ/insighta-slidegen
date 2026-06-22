@@ -43,7 +43,7 @@ from acquire import download_frames
 from frames import extract_candidates
 from preselect import preselect_candidates
 from captions import detect_topic_changes
-from typing_select import select_keyframes
+from typing_select import SelectedFrame, select_keyframes
 from figure_extract import ExtractedFigure, extract_figures as cv_extract_figures
 from bundle import assemble_resources
 from observability import StageArtifactSink
@@ -156,6 +156,10 @@ class ResultResponse(BaseModel):
 
 # ± window (sec) acquired around each requested timestamp for the figure scan.
 NUMERIZE_WINDOW_SEC = 10.0
+# Cap on candidate frames numerized per request. YOLO over-detects (~15-20 boxes
+# per content slide) and each box is a Qwen call, so a tight frame cap keeps the
+# synchronous call within the demo timeout while still covering the windows.
+NUMERIZE_MAX_FRAMES = 4
 
 
 class NumerizeRequest(BaseModel):
@@ -279,10 +283,33 @@ def numerize(req: NumerizeRequest) -> NumerizeResponse:
     yolo, vlm = _build_extraction_clients()
     gated = preselect_candidates(candidates, yolo=yolo)
     candidates = gated if gated else candidates
-    topic_points = detect_topic_changes(req.video_id, req.mode)
-    selected = select_keyframes(
-        candidates, topic_points, req.mode, sections=sections, youtube_video_id=req.video_id
-    )
+    # extract_candidates scans the WHOLE video; ⑤ only wants figures near the
+    # requested timestamps. Restrict to candidates inside a requested window, then
+    # cap the count — without this, the select-bypass below YOLO+Qwens every frame
+    # of the video (~18 boxes each) and a dense talk blows past the sync timeout.
+    windows = [(s["from_sec"], s["to_sec"]) for s in sections]
+    in_window = [c for c in candidates if any(lo <= c.timestamp_sec <= hi for lo, hi in windows)]
+    candidates = (in_window or candidates)[:NUMERIZE_MAX_FRAMES]
+    # ⑤ COMPUTE bypasses typing_select.select_keyframes: on a figure-rich video
+    # select flagged 0 figure-bearing frames (its VLM mode-A routing dropped real
+    # tables/diagrams — root-cause is a select backlog item). /numerize's job is
+    # to EXTRACT figures from the requested windows, so flag EVERY candidate and
+    # let extract_figures' own quality gates do the rejecting — conf floor +
+    # struct consistency + the R3 over-generation guard. Fail-closed is preserved:
+    # a non-figure crop still gets dropped (text/ui_badge reject), nothing fabricated.
+    selected = [
+        SelectedFrame(
+            candidate=c,
+            contains_graph=True,
+            contains_equation=True,
+            frame_type="figure",
+            summary_hint=None,
+            is_topic_aligned=False,
+            nearest_topic_point=None,
+            selection_score=1.0,
+        )
+        for c in candidates
+    ]
     figures = cv_extract_figures(selected, yolo=yolo, vlm=vlm, out_dir=frames_dir / "crops")
     return NumerizeResponse(
         figures=[
