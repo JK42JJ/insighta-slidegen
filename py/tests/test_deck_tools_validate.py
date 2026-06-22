@@ -65,6 +65,17 @@ def test_meta_text_and_timestamp_detection():
     assert TIMESTAMP.search(clean_body) is None
 
 
+def test_meta_is_provenance_only_not_domain_subject():
+    """Provenance-only META: domain subject words ('영상 제작', '유튜브 콘텐츠') must
+    NOT trip the gate (over-flag fix), while real provenance phrasing still does."""
+    for subject in ("영상 제작 워크플로우", "유튜브 콘텐츠 전략", "영상 편집 도구"):
+        body = analyze(_slide_xml(_sp(IN_X, IN_Y, IN_CX, IN_CY, subject)))["body"]
+        assert META.search(body) is None, f"domain subject over-flagged: {subject}"
+    for provenance in ("이 영상에서는 다룬다", "본 강의 자료입니다", "채널 구독 부탁드립니다"):
+        body = analyze(_slide_xml(_sp(IN_X, IN_Y, IN_CX, IN_CY, provenance)))["body"]
+        assert META.search(body) is not None, f"provenance not caught: {provenance}"
+
+
 def test_slides_sorted_numerically_not_lexically():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:

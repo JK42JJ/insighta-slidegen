@@ -17,7 +17,14 @@ SP = re.compile(r'<p:sp>.*?</p:sp>', re.S)
 OFF = re.compile(r'<a:off x="(-?\d+)" y="(-?\d+)"\s*/>')
 EXT = re.compile(r'<a:ext cx="(\d+)" cy="(\d+)"\s*/>')
 AT = re.compile(r'<a:t>(.*?)</a:t>', re.S)
-META = re.compile(r'영상|출처\s*영상|동반\s*별첨|별첨|VIDEO\s*DIGEST|채널명|유튜브|youtube', re.I)
+# Source/provenance META only — bare 영상|유튜브 over-flags domain subject words
+# ("영상 제작", "유튜브 콘텐츠"). Match provenance PHRASING instead (book_json
+# narratives carry "이 영상에서는…" which IS provenance and stays caught).
+META = re.compile(
+    r'이\s*영상|영상\s*에서(는)?|본\s*강의|강사(님)?|채널\s*구독|구독.{0,15}좋아요|'
+    r'출처\s*영상|동반\s*별첨|별첨|VIDEO\s*DIGEST|채널명',
+    re.I,
+)
 TIMESTAMP = re.compile(r'\b\d{1,2}:\d{2}\b')
 DARK_BG = ("0B1220", "16213E")
 
