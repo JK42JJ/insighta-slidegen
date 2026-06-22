@@ -43,7 +43,7 @@ from acquire import download_frames
 from frames import extract_candidates
 from preselect import preselect_candidates
 from captions import detect_topic_changes
-from typing_select import select_keyframes
+from typing_select import SelectedFrame, select_keyframes
 from figure_extract import ExtractedFigure, extract_figures as cv_extract_figures
 from bundle import assemble_resources
 from observability import StageArtifactSink
@@ -151,6 +151,41 @@ class ResultResponse(BaseModel):
 
 
 # ----------------------------------------------------------------
+# ⑤ get-or-extract COMPUTE contract (insighta numerize-client calls this)
+# ----------------------------------------------------------------
+
+# ± window (sec) acquired around each requested timestamp for the figure scan.
+NUMERIZE_WINDOW_SEC = 10.0
+# Cap on candidate frames numerized per request. YOLO over-detects (~15-20 boxes
+# per content slide) and each box is a Qwen call, so a tight frame cap keeps the
+# synchronous call within the demo timeout while still covering the windows.
+NUMERIZE_MAX_FRAMES = 4
+
+
+class NumerizeRequest(BaseModel):
+    """insighta ⑤ numerize-client request: figure data for a video at timestamps."""
+
+    video_id: str
+    ts: list[int]
+    mode: str = "prod"
+
+
+class NumerizeFigure(BaseModel):
+    """One extracted figure's DATA (not a rendered asset) — the ⑤ cache row shape."""
+
+    kind: str
+    ts_sec: int | None = None
+    struct: dict | None = None
+    latex: str | None = None
+    asset_path: str | None = None
+    verification_status: str = "pending"
+
+
+class NumerizeResponse(BaseModel):
+    figures: list[NumerizeFigure]
+
+
+# ----------------------------------------------------------------
 # Endpoints
 # ----------------------------------------------------------------
 
@@ -216,6 +251,78 @@ def slides_result(job_id: str) -> ResultResponse:
         figures=[FigureResult(**f) for f in job["figures"]],
         keyframe_count=job["keyframe_count"],
         resources=job.get("resources", {}),
+    )
+
+
+@app.post("/numerize", response_model=NumerizeResponse)
+def numerize(req: NumerizeRequest) -> NumerizeResponse:
+    """⑤ get-or-extract COMPUTE: {video_id, ts:[]} → figures with struct/latex.
+
+    Synchronous adapter for the insighta ⑤ contract. Acquires a short window
+    around each ts, then runs the SAME CV pipeline as /slides/generate
+    (acquire → frames → preselect → select → YOLO + Qwen numerize) and returns
+    per-figure EXTRACTED DATA (struct / latex). insighta ⑤ persists these to its
+    video_figure_snapshots cache — slidegen never writes that table (slide_* only).
+    Fail-closed: figure_extract's gates drop non-figures, so only real figures
+    (chart/diagram/table/equation/keyframe) are returned; nothing is fabricated.
+    """
+    if req.mode == "prod" and SLIDEGEN_MODE == "dev":
+        raise HTTPException(
+            status_code=400, detail="Vision API disabled in dev mode (SLIDEGEN_MODE=dev)"
+        )
+    sections = [
+        {
+            "index": i,
+            "from_sec": max(0.0, float(t) - NUMERIZE_WINDOW_SEC),
+            "to_sec": float(t) + NUMERIZE_WINDOW_SEC,
+        }
+        for i, t in enumerate(req.ts)
+    ]
+    frames_dir = download_frames(req.video_id, sections)
+    candidates = extract_candidates(frames_dir / "video.mp4")
+    yolo, vlm = _build_extraction_clients()
+    gated = preselect_candidates(candidates, yolo=yolo)
+    candidates = gated if gated else candidates
+    # extract_candidates scans the WHOLE video; ⑤ only wants figures near the
+    # requested timestamps. Restrict to candidates inside a requested window, then
+    # cap the count — without this, the select-bypass below YOLO+Qwens every frame
+    # of the video (~18 boxes each) and a dense talk blows past the sync timeout.
+    windows = [(s["from_sec"], s["to_sec"]) for s in sections]
+    in_window = [c for c in candidates if any(lo <= c.timestamp_sec <= hi for lo, hi in windows)]
+    candidates = (in_window or candidates)[:NUMERIZE_MAX_FRAMES]
+    # ⑤ COMPUTE bypasses typing_select.select_keyframes: on a figure-rich video
+    # select flagged 0 figure-bearing frames (its VLM mode-A routing dropped real
+    # tables/diagrams — root-cause is a select backlog item). /numerize's job is
+    # to EXTRACT figures from the requested windows, so flag EVERY candidate and
+    # let extract_figures' own quality gates do the rejecting — conf floor +
+    # struct consistency + the R3 over-generation guard. Fail-closed is preserved:
+    # a non-figure crop still gets dropped (text/ui_badge reject), nothing fabricated.
+    selected = [
+        SelectedFrame(
+            candidate=c,
+            contains_graph=True,
+            contains_equation=True,
+            frame_type="figure",
+            summary_hint=None,
+            is_topic_aligned=False,
+            nearest_topic_point=None,
+            selection_score=1.0,
+        )
+        for c in candidates
+    ]
+    figures = cv_extract_figures(selected, yolo=yolo, vlm=vlm, out_dir=frames_dir / "crops")
+    return NumerizeResponse(
+        figures=[
+            NumerizeFigure(
+                kind=f.kind,
+                ts_sec=f.timestamp_sec,
+                struct=f.struct,
+                latex=f.extracted_latex,
+                asset_path=f.png_path,
+                verification_status=f.verification_status,
+            )
+            for f in figures
+        ]
     )
 
 
@@ -439,3 +546,14 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
             "failure_stage": _normalize_failure_stage(exc, stage),
             "progress_pct": 0.0,
         })
+
+
+# ----------------------------------------------------------------
+# ⑤ numerize ASYNC JOB — sync /numerize는 60s 안에 불가(단일 ts≈148s, cv_extract
+# Qwen VLM이 본질 비용). /slides/* job 패턴을 미러해 60s 벽을 우회(client가 poll).
+# ----------------------------------------------------------------
+import numerize_job
+
+numerize_job.register(
+    app, _build_extraction_clients, cv_extract_figures, StatusResponse, NumerizeFigure, SLIDEGEN_MODE
+)
