@@ -546,3 +546,14 @@ def _run_pipeline(job_id: str, req: GenerateRequest) -> None:
             "failure_stage": _normalize_failure_stage(exc, stage),
             "progress_pct": 0.0,
         })
+
+
+# ----------------------------------------------------------------
+# ⑤ numerize ASYNC JOB — sync /numerize는 60s 안에 불가(단일 ts≈148s, cv_extract
+# Qwen VLM이 본질 비용). /slides/* job 패턴을 미러해 60s 벽을 우회(client가 poll).
+# ----------------------------------------------------------------
+import numerize_job
+
+numerize_job.register(
+    app, _build_extraction_clients, cv_extract_figures, StatusResponse, NumerizeFigure, SLIDEGEN_MODE
+)
