@@ -55,12 +55,12 @@ function makeTemplates(D, opts = {}) {
       page = 1; return s;
     },
     /* 큰 그림: 워크플로우 루프 + 호기심 훅 카드 3개 */
-    roadmapLoop({ kicker = "Big Picture", title, intro, stages, hooks = [], cat = "blue" }) {
+    roadmapLoop({ kicker = "Big Picture", title, intro, stages, hooks = [], cat = "blue", loopNote = "반복(epoch)마다 손실이 줄도록 모델을 조금씩 고친다" }) {
       page++; const s = newSlide(); header(s, { kicker, title, cat });
       if (intro) s.addText(intro, { x: MX, y: 1.62, w: CW, h: 0.5, fontFace: BRAND.font.body, fontSize: 13.5, color: BRAND.text, margin: 0 });
       flow(s, stages, { y: 2.5, h: 1.5, cat });
       const ly = loopArrow(s, 4.0, BRAND.cats[cat].c);
-      s.addText("반복(epoch)마다 손실이 줄도록 모델을 조금씩 고친다", { x: MX, y: ly + 0.1, w: CW, h: 0.3, fontFace: BRAND.font.mono, fontSize: 10, color: BRAND.cats[cat].d, align: "center", margin: 0 });
+      s.addText(loopNote, { x: MX, y: ly + 0.1, w: CW, h: 0.3, fontFace: BRAND.font.mono, fontSize: 10, color: BRAND.cats[cat].d, align: "center", margin: 0 });
       const n = Math.min(hooks.length, 3), cw = (CW - 0.6) / 3;
       hooks.slice(0, 3).forEach((q, i) => { const cx = MX + i * (cw + 0.3), cy = 5.2; card(s, cx, cy, cw, 1.4, cat);
         s.addText(q.q, { x: cx + 0.24, y: cy + 0.16, w: cw - 0.44, h: 0.6, fontFace: BRAND.font.display, fontSize: 12, bold: true, color: BRAND.cats[cat].d, valign: "top", margin: 0 });
@@ -100,6 +100,36 @@ function makeTemplates(D, opts = {}) {
         s.addText(p, { x: rx + 0.28, y: y - 0.02, w: rw - 0.28, h: 0.6, fontFace: BRAND.font.body, fontSize: 11.5, color: BRAND.muted, valign: "top", lineSpacingMultiple: 1.06, margin: 0 }); y += 0.74; });
       if (aha) { card(s, rx, 5.55, rw, 0.95, cat);
         s.addText([{ text: "직관  ", options: { bold: true, color: C.d, fontFace: BRAND.font.display, fontSize: 11 } }, { text: aha, options: { color: BRAND.text, fontFace: BRAND.font.body, fontSize: 11.5 } }], { x: rx + 0.26, y: 5.62, w: rw - 0.5, h: 0.8, valign: "middle", lineSpacingMultiple: 1.08, margin: 0 }); }
+      footer(s, page, total); return s;
+    },
+    /* 와이드 figure 전폭 배치 (CV 추출 파이프라인/플로우 다이어그램용).
+       teach의 반폭 슬롯은 가로로 긴 다이어그램을 레터박싱으로 축소시킴 →
+       전폭 슬롯에 contain 배치 + points가 있으면 하단을 핵심포인트 카드로 채워
+       "세로 빈 공간"을 방지. 한글 캡션은 템플릿이 별도로(영문 baked 금지). */
+    figureFull({ kicker = "Figure", title, cat = "blue", figure, caption, points = [] }) {
+      page++; const s = newSlide(); header(s, { kicker, title, cat }); const C = BRAND.cats[cat];
+      const img = F(figure);
+      const figSlotY = 1.78, figSlotH = points.length ? 2.95 : 4.7;
+      const pb = fitBox(img, CW, figSlotH, 0.18);
+      imagePanel(s, { x: MX + (CW - pb.w) / 2, y: figSlotY + (figSlotH - pb.h) / 2, w: pb.w, h: pb.h, img, pad: 0.18 });
+      if (caption) s.addText(caption, { x: MX, y: figSlotY + figSlotH + 0.06, w: CW, h: 0.34, align: "center", fontFace: BRAND.font.body, fontSize: 11.5, italic: true, color: BRAND.muted, margin: 0 });
+      if (points.length) {
+        const n = Math.min(points.length, 3), gap = 0.3, cw = (CW - gap * (n - 1)) / n, cy = 5.35;
+        points.slice(0, 3).forEach((p, i) => { const cx = MX + i * (cw + gap); card(s, cx, cy, cw, 1.32, cat);
+          s.addText(p.h, { x: cx + 0.22, y: cy + 0.16, w: cw - 0.42, h: 0.34, fontFace: BRAND.font.display, fontSize: 12, bold: true, color: C.d, valign: "top", margin: 0 });
+          s.addText(p.t, { x: cx + 0.22, y: cy + 0.54, w: cw - 0.42, h: 0.72, fontFace: BRAND.font.body, fontSize: 10.5, color: BRAND.muted, valign: "top", lineSpacingMultiple: 1.06, margin: 0 }); });
+      }
+      footer(s, page, total); return s;
+    },
+    /* 네이티브 비교표 (편집 가능 — 이미지 아님). multi-hop 표 등. */
+    comparisonTable({ kicker = "Comparison", title, cat = "slate", intro, headers, rows, colW }) {
+      page++; const s = newSlide(); header(s, { kicker, title, cat });
+      if (intro) s.addText(intro, { x: MX, y: 1.6, w: CW, h: 0.4, fontFace: BRAND.font.body, fontSize: 12.5, color: BRAND.muted, margin: 0 });
+      const w = CW, cw = colW || headers.map((_, i) => (i === 0 ? w * 0.26 : (w * 0.74) / (headers.length - 1)));
+      const top = intro ? 2.1 : 1.74, end = 6.6, nRows = rows.length + 1;
+      const rowH = Math.min(1.05, (end - top) / nRows);
+      const y = top + Math.max(0, (end - top - rowH * nRows) / 2);
+      table(s, { x: MX, y, w, headers, rows, cat, colW: cw, fontSize: 11.5, rowH });
       footer(s, page, total); return s;
     },
     /* 두 그래프 + 설명 카드 2개 */
@@ -144,14 +174,14 @@ function makeTemplates(D, opts = {}) {
       conceptGrid(s, items, { cat, cols, y: 1.7, h: 4.7 }); footer(s, page, total); return s;
     },
     /* 본질: 학습 루프 재방문 (다크) + 합성 문장 */
-    essenceLoop({ kicker = "ESSENCE", title, stages, synthesisRuns, cat = "violet" }) {
+    essenceLoop({ kicker = "ESSENCE", title, stages, synthesisRuns, cat = "violet", loopNote = "반복 학습 (epoch)" }) {
       page++; const s = newSlide(true);
       s.addShape(shapes.OVAL, { x: 10.2, y: -1.8, w: 5.4, h: 5.4, fill: { color: BRAND.primary, transparency: 86 }, line: { type: "none" } });
       s.addText(kicker, { x: 0.7, y: 0.58, w: 9, h: 0.3, fontFace: BRAND.font.mono, fontSize: 11, bold: true, color: BRAND.purpleLite, charSpacing: 3, margin: 0 });
       s.addText(title, { x: 0.7, y: 0.9, w: 12, h: 0.6, fontFace: BRAND.font.display, fontSize: 26, bold: true, color: BRAND.white, margin: 0 });
       flow(s, stages, { y: 2.35, h: 1.4, cat, onDark: true });
       const ly = loopArrow(s, 3.75, BRAND.purpleLite);
-      s.addText("반복 학습 (epoch)", { x: MX, y: ly + 0.05, w: CW, h: 0.3, fontFace: BRAND.font.mono, fontSize: 10, color: BRAND.purpleLite, align: "center", margin: 0 });
+      s.addText(loopNote, { x: MX, y: ly + 0.05, w: CW, h: 0.3, fontFace: BRAND.font.mono, fontSize: 10, color: BRAND.purpleLite, align: "center", margin: 0 });
       s.addText(synthesisRuns, { x: 0.7, y: 4.95, w: 12, h: 1.0, fontFace: BRAND.font.body, fontSize: 13.5, lineSpacingMultiple: 1.18, valign: "top", margin: 0 });
       footer(s, page, total); return s;
     },

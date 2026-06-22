@@ -36,7 +36,7 @@ function createDeck(meta = {}) {
   function footer(slide, n, total) {
     slide.addText([
       { text: "Insighta", options: { bold: true, color: BRAND.primary } },
-      { text: "   ML · AI 핵심 개념", options: { color: BRAND.faint } },
+      ...(meta.footer ? [{ text: "   " + meta.footer, options: { color: BRAND.faint } }] : []),
     ], { x: MX, y: 7.04, w: 7, h: 0.3, fontFace: BRAND.font.body, fontSize: 9, align: "left", valign: "middle", margin: 0 });
     slide.addText(`${n} / ${total}`, {
       x: PAGE_W - MX - 2, y: 7.04, w: 2, h: 0.3, fontFace: BRAND.font.mono,
