@@ -293,8 +293,14 @@ def numerize(req: NumerizeRequest) -> NumerizeResponse:
     # (preselect attached it from the same YOLO pass — no extra detect), ts asc to
     # break ties. The first-N pick grabbed section-intro text/title slides → kind=text
     # → 0 figures; ranking surfaces the figure-bearing frames in the window instead.
+    # CP505 — NO whole-video fallback. If no figure-candidate falls in the requested
+    # windows, return 0 figures (honest "no figure near these ts"). The prior
+    # `in_window or candidates` returned the best figure from ANYWHERE in the video
+    # (e.g. ts=619 for a request at 228-420) → a wrong-segment figure poisoned the
+    # SHARED video_figure_snapshots base cache (note/deck/newsletter all consume it).
+    # ts fidelity > recall: caller's requested ts is trusted (subtitle-grounded).
     candidates = sorted(
-        (in_window or candidates),
+        in_window,
         key=lambda c: (-getattr(c, "fig_box_count", 0), c.timestamp_sec),
     )[:NUMERIZE_MAX_FRAMES]
     # ⑤ COMPUTE bypasses typing_select.select_keyframes: on a figure-rich video
