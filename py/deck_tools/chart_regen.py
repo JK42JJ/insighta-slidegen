@@ -121,10 +121,13 @@ def _ax(figsize: tuple[float, float] = DEFAULT_FIGSIZE):
     return fig, ax
 
 
-def _chart_has_variance(series) -> bool:
-    """Drop flat/degenerate charts: y-values all equal → no information (e.g. a flat
-    line at y=0, the CP505 sample). Require spread in the measured (y) axis. "정확하거나
-    없거나" — a low-info chart must not pollute the shared figure base."""
+def _chart_has_variance(series, chart_type) -> bool:
+    """Drop flat LINE/SCATTER (all y equal → no information, e.g. a flat line at y=0,
+    the CP505 sample). Bars still convey magnitude when equal, so bar always passes
+    (an equal-height bar chart is valid). "정확하거나 없거나" — a low-info line/scatter
+    must not pollute the shared figure base."""
+    if chart_type == "bar":
+        return True
     ys = [y for _name, _xs, yvals in series for y in yvals]
     if len(ys) < 2:
         return False
@@ -145,7 +148,7 @@ def regenerate_chart(struct: dict, out_path: str | os.PathLike) -> str | None:
     series = _normalize_series(struct.get("series"))
     if not series:
         return None
-    if not _chart_has_variance(series):
+    if not _chart_has_variance(series, chart_type):
         return None  # CP505: flat (all y equal) → drop; never a low-info chart
 
     # §2b: extreme single-series bar spread → broken-axis 2-panel render.
@@ -389,7 +392,7 @@ def regenerate_chart_svg(struct: dict) -> str | None:
     series = _normalize_series(struct.get("series"))
     if not series:
         return None
-    if not _chart_has_variance(series):
+    if not _chart_has_variance(series, chart_type):
         return None  # CP505: flat (all y equal) → drop; never a low-info chart
 
     if chart_type == "bar" and _needs_broken_axis(series):
