@@ -34,10 +34,26 @@ from __future__ import annotations
 import os
 import sys
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
+
+# ── deck_tools sys.path injection ─────────────────────────────────────────────
+# render_figure_svg (deck_tools.svg_output) lives in the py/ package which is
+# NOT installed in the service venv — it is a co-located sibling directory.
+# Direct import (Python→Python) is used here instead of the subprocess path
+# that build_deck_service.js uses: that JS→Python boundary requires execFileSync
+# because Node.js cannot import Python natively.  For this Python FastAPI
+# service, a direct import is simpler, faster, and avoids a shell round-trip.
+# SLIDEGEN_PY_DIR (same env var deck_build_job.py uses) is the preferred source;
+# the Path(__file__) fallback keeps the dev/test environment working without
+# the variable set.
+_py_dir_env = os.environ.get("SLIDEGEN_PY_DIR", "")
+_PY_DIR = Path(_py_dir_env) if _py_dir_env else Path(__file__).parent.parent.parent / "py"
+if str(_PY_DIR) not in sys.path and _PY_DIR.is_dir():
+    sys.path.insert(0, str(_PY_DIR))
 
 from acquire import download_frames
 from frames import extract_candidates
@@ -185,6 +201,21 @@ class NumerizeResponse(BaseModel):
     figures: list[NumerizeFigure]
 
 
+# ── /render-figure ────────────────────────────────────────────────────────────
+
+class RenderFigureRequest(BaseModel):
+    """CPU-only SVG render request: figure kind + mode-B struct."""
+
+    kind: str
+    struct: dict
+
+
+class RenderFigureResponse(BaseModel):
+    """Inline SVG string, or null when the struct is unrenderable."""
+
+    svg: str | None
+
+
 # ----------------------------------------------------------------
 # Endpoints
 # ----------------------------------------------------------------
@@ -193,6 +224,29 @@ class NumerizeResponse(BaseModel):
 def health() -> dict:
     """Returns service health and active mode. Always 200 when server is up."""
     return {"status": "ok", "mode": SLIDEGEN_MODE}
+
+
+@app.post("/render-figure", response_model=RenderFigureResponse)
+def render_figure(req: RenderFigureRequest) -> RenderFigureResponse:
+    """CPU-only: render a mode-B figure struct to an inline SVG string.
+
+    Calls deck_tools.svg_output.render_figure_svg (graphviz dot + matplotlib;
+    no GPU, no vLLM, no YOLO).  Fail-closed: any exception → {svg: null} so
+    the note path is never crashed by a bad struct.
+
+    Returns:
+        {svg: "<SVG string>"}  for diagram/chart with renderable struct.
+        {svg: null}            for table/equation (rendered note-side) or on
+                               any degenerate/unsupported struct or error.
+    """
+    try:
+        from deck_tools.svg_output import render_figure_svg  # noqa: PLC0415
+
+        svg = render_figure_svg(req.kind, req.struct)
+        return RenderFigureResponse(svg=svg)
+    except Exception as exc:  # noqa: BLE001 — fail-closed, never 500-crash the note path
+        sys.stderr.write(f"render_figure error kind={req.kind!r}: {exc!r}\n")
+        return RenderFigureResponse(svg=None)
 
 
 @app.post("/slides/generate", response_model=GenerateResponse)
