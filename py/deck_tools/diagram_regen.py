@@ -239,6 +239,41 @@ def _has_enough_ink(out_path: str | os.PathLike) -> bool:
         return True
 
 
+def regenerate_diagram_svg(struct: dict, font_scale: float = 1.0) -> str | None:
+    """Render a diagram/table struct to an inline SVG string.
+
+    Same fail-closed gates as regenerate_diagram (unusable struct / dot absent →
+    None). Calls g.pipe(format="svg") — no file written. The graphviz SVG is
+    self-contained (fonts/styles embedded inline by dot).
+    """
+    if not isinstance(struct, dict) or not _have_dot():
+        return None
+    install_korean_font()
+    try:
+        import graphviz
+    except ImportError:
+        return None
+
+    if "headers" in struct and "rows" in struct:
+        g = _render_table(graphviz, struct)
+    else:
+        dtype = struct.get("diagram_type")
+        if dtype not in SUPPORTED_DIAGRAM_TYPES:
+            return None
+        nodes = struct.get("nodes") or []
+        if not _nodes_edges_consistent(nodes, struct.get("edges") or []):
+            return None
+        g = _render_diagram(graphviz, dtype, nodes, struct.get("edges") or [], font_scale)
+    if g is None:
+        return None
+
+    try:
+        svg = g.pipe(format="svg").decode("utf-8")
+    except Exception:  # noqa: BLE001 — dot render boundary
+        return None
+    return svg if "<svg" in svg else None
+
+
 def main() -> int:
     """CLI for the node deck runner. stdin job:
         {"struct": <diagram|table struct>, "out": "<png>", "font_scale": <float>}
