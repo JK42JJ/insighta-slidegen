@@ -26,6 +26,7 @@ Bar-chart points may also use the reference {"label": "", "value": 0} form
 
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
 from typing import Any
@@ -120,6 +121,16 @@ def _ax(figsize: tuple[float, float] = DEFAULT_FIGSIZE):
     return fig, ax
 
 
+def _chart_has_variance(series) -> bool:
+    """Drop flat/degenerate charts: y-values all equal → no information (e.g. a flat
+    line at y=0, the CP505 sample). Require spread in the measured (y) axis. "정확하거나
+    없거나" — a low-info chart must not pollute the shared figure base."""
+    ys = [y for _name, _xs, yvals in series for y in yvals]
+    if len(ys) < 2:
+        return False
+    return max(ys) != min(ys)
+
+
 def regenerate_chart(struct: dict, out_path: str | os.PathLike) -> str | None:
     """Regenerate a chart PNG from a mode-B struct.
 
@@ -134,6 +145,8 @@ def regenerate_chart(struct: dict, out_path: str | os.PathLike) -> str | None:
     series = _normalize_series(struct.get("series"))
     if not series:
         return None
+    if not _chart_has_variance(series):
+        return None  # CP505: flat (all y equal) → drop; never a low-info chart
 
     # §2b: extreme single-series bar spread → broken-axis 2-panel render.
     if chart_type == "bar" and _needs_broken_axis(series):
@@ -350,6 +363,112 @@ def _normalize_series(raw: Any) -> list[tuple[str, list, list]]:
         if ys:
             out.append((str(entry.get("name") or ""), xs, ys))
     return out
+
+
+def _has_enough_ink_svg(svg: str) -> bool:
+    """SVG equivalent of _has_enough_ink: True when the SVG has drawn content.
+
+    Matplotlib always emits <path> for axes spines; a completely empty render
+    (backend error) would produce a very short string. 200-char floor catches
+    that without false-rejecting real figures.
+    """
+    return bool(svg) and "<svg" in svg and len(svg) > 200
+
+
+def regenerate_chart_svg(struct: dict) -> str | None:
+    """Regenerate a chart as an inline SVG string from a mode-B struct.
+
+    Same degenerate gates as regenerate_chart (unknown type / empty series /
+    flat). Returns SVG string or None; no file written.
+    """
+    if not isinstance(struct, dict):
+        return None
+    chart_type = struct.get("chart_type")
+    if chart_type not in SUPPORTED_CHART_TYPES:
+        return None
+    series = _normalize_series(struct.get("series"))
+    if not series:
+        return None
+    if not _chart_has_variance(series):
+        return None  # CP505: flat (all y equal) → drop; never a low-info chart
+
+    if chart_type == "bar" and _needs_broken_axis(series):
+        return _regenerate_bar_broken_svg(struct, series)
+
+    fig, ax = _ax()
+    try:
+        if chart_type == "bar":
+            _draw_bar(ax, series)
+        elif chart_type == "scatter":
+            for i, (name, xs, ys) in enumerate(series):
+                ax.scatter(xs, ys, s=26, color=_color(i), alpha=0.8, zorder=3, label=name)
+        else:  # line
+            for i, (name, xs, ys) in enumerate(series):
+                ax.plot(xs, ys, color=_color(i), lw=2.4, zorder=3, label=name)
+
+        axes = struct.get("axes") or {}
+        if axes.get("x"):
+            ax.set_xlabel(str(axes["x"]), fontsize=10, color=INK)
+        if axes.get("y"):
+            ax.set_ylabel(str(axes["y"]), fontsize=10, color=INK)
+        # A2: insight/title is NOT baked into the SVG — rendered as slide text.
+        if any(name for name, _xs, _ys in series):
+            ax.legend(frameon=False, fontsize=9)
+
+        plt.tight_layout(pad=0.4)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="svg", transparent=True, bbox_inches="tight")
+        svg = buf.getvalue().decode("utf-8")
+    finally:
+        plt.close(fig)
+
+    return svg if _has_enough_ink_svg(svg) else None
+
+
+def _regenerate_bar_broken_svg(struct: dict, series: list[tuple[str, list, list]]) -> str | None:
+    """SVG variant of _regenerate_bar_broken (saves to BytesIO instead of file)."""
+    name, xs, ys = series[0]
+    labels = [str(x) for x in xs]
+    heights = ys[: len(labels)]
+    positions = list(range(len(labels)))
+    small_max = sorted(v for v in heights if v > 0)[len(heights) // 2] * 2
+
+    fig, (ax_top, ax_bot) = plt.subplots(
+        2, 1, figsize=(DEFAULT_FIGSIZE[0], DEFAULT_FIGSIZE[1] * 1.25), dpi=FIGURE_DPI, sharex=True
+    )
+    for axp in (ax_top, ax_bot):
+        axp.patch.set_alpha(0)
+        for spine in ("top", "right"):
+            axp.spines[spine].set_visible(False)
+        axp.spines["left"].set_color(LINE)
+        axp.spines["bottom"].set_color(LINE)
+        axp.tick_params(colors=MUT, labelsize=9)
+    fig.patch.set_alpha(0)
+    try:
+        for axp in (ax_top, ax_bot):
+            bars = axp.bar(positions, heights, width=BAR_GROUP_WIDTH, color=_color(0), zorder=3)
+            axp.bar_label(
+                bars, labels=[_value_label(v) for v in heights], padding=2, fontsize=8, color=MUT
+            )
+        ax_top.set_ylim(0, max(heights) * 1.12)
+        ax_bot.set_ylim(0, small_max)
+        ax_top.spines["bottom"].set_visible(False)
+        ax_top.tick_params(bottom=False)
+        ax_bot.set_xticks(positions)
+        ax_bot.set_xticklabels(labels)
+        axes_spec = struct.get("axes") or {}
+        if axes_spec.get("y"):
+            ax_bot.set_ylabel(str(axes_spec["y"]), fontsize=10, color=INK)
+        if axes_spec.get("x"):
+            ax_bot.set_xlabel(str(axes_spec["x"]), fontsize=10, color=INK)
+        # A2: insight/title rendered as editable slide text, not baked here.
+        plt.tight_layout(pad=0.4)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="svg", transparent=True, bbox_inches="tight")
+        svg = buf.getvalue().decode("utf-8")
+    finally:
+        plt.close(fig)
+    return svg if _has_enough_ink_svg(svg) else None
 
 
 def main() -> int:
