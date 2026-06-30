@@ -13,9 +13,10 @@ def render_figure_svg(kind: str, struct: dict, theme: str = "light") -> str | No
         kind: 'diagram' | 'chart' | 'table' | 'equation'.
               'table' and 'equation' return None (rendered note-side).
         struct: mode-B figure struct produced by figure_extract.
-        theme: 'light' (default, dark ink — .pptx deck) or 'dark'
-               (light ink + transparent bg — FE note card). Default preserves
-               existing deck behavior; only the FE path passes theme='dark'.
+        theme: 'light' (default, dark ink — .pptx deck), 'dark'
+               (light ink + transparent bg — FE note card), or 'auto'
+               (transparent bg + #808080 sentinel ink; FE swaps to currentColor
+               so one SVG renders correctly on both dark and light backgrounds).
 
     Returns:
         Self-contained SVG string, or None when kind is unsupported or the

@@ -206,3 +206,75 @@ def test_chart_light_svg_unchanged():
     # Light spine color LINE = #CBD5E1 must appear.
     assert "#cbd5e1" in svg_lower, \
         "light SVG must retain light-palette LINE color #CBD5E1 (deck behavior unchanged)"
+
+
+# ── Adaptive-theme (auto) tests ───────────────────────────────────────────────
+
+# A 4-node flow used to confirm auto theme renders and the density gate passes.
+AUTO_FLOW_STRUCT = FLOW_STRUCT  # reuse the 4-node prod struct
+
+# 2-node diagram: must be dropped by the density gate (fewer than MIN_DIAGRAM_NODES).
+DIAGRAM_2_NODE = {
+    "diagram_type": "flow",
+    "nodes": [
+        {"id": "A", "label": "Start"},
+        {"id": "B", "label": "End"},
+    ],
+    "edges": [{"from": "A", "to": "B"}],
+}
+
+# 3-node diagram: exactly at MIN_DIAGRAM_NODES — must produce SVG.
+DIAGRAM_3_NODE = {
+    "diagram_type": "flow",
+    "nodes": [
+        {"id": "A", "label": "Start"},
+        {"id": "B", "label": "Middle"},
+        {"id": "C", "label": "End"},
+    ],
+    "edges": [{"from": "A", "to": "B"}, {"from": "B", "to": "C"}],
+}
+
+
+@dot_required
+def test_auto_diagram_svg_sentinel_ink():
+    """Auto diagram SVG must carry #808080 sentinel ink, transparent bg, no white fill.
+
+    The FE string-replaces #808080 → currentColor so one SVG works on both
+    dark and light page backgrounds.
+    """
+    svg = render_figure_svg("diagram", AUTO_FLOW_STRUCT, theme="auto")
+    assert svg is not None, "auto diagram must produce SVG"
+    assert "<svg" in svg
+
+    svg_lower = svg.lower()
+    # Sentinel ink must appear (edge color and/or fontcolor set to #808080).
+    assert "#808080" in svg_lower, \
+        "auto SVG must contain #808080 sentinel ink for FE currentColor swap"
+    # No white-fill background polygon (bgcolor=transparent → no white rect).
+    assert 'fill="white"' not in svg_lower, \
+        "auto SVG must not contain fill=white background"
+    # No opaque white hex fill on nodes (node fills are transparent, not white).
+    assert 'fill="#ffffff"' not in svg_lower, \
+        "auto SVG must not contain opaque #ffffff fill"
+    # Near-black light-mode INK must not appear (proved auto palette was applied).
+    assert "#0f172a" not in svg_lower, \
+        "auto SVG must not use near-black INK color #0F172A"
+
+
+@dot_required
+def test_diagram_density_2nodes_returns_none():
+    """A 2-node diagram is below MIN_DIAGRAM_NODES and must be dropped (return None)."""
+    from deck_tools.diagram_regen import regenerate_diagram_svg
+
+    result = regenerate_diagram_svg(DIAGRAM_2_NODE)
+    assert result is None, "2-node diagram must be dropped by the density gate"
+
+
+@dot_required
+def test_diagram_density_3nodes_produces_svg():
+    """A 3-node diagram meets MIN_DIAGRAM_NODES exactly and must produce SVG."""
+    from deck_tools.diagram_regen import regenerate_diagram_svg
+
+    result = regenerate_diagram_svg(DIAGRAM_3_NODE)
+    assert result is not None, "3-node diagram must produce SVG (at density floor)"
+    assert "<svg" in result

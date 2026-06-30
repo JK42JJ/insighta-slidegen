@@ -210,7 +210,9 @@ class RenderFigureRequest(BaseModel):
     struct: dict
     # 'light' (default) = dark ink, matches .pptx deck (existing behavior).
     # 'dark' = light ink + transparent bg for FE note card (dark card surface).
-    theme: Literal["light", "dark"] = "light"
+    # 'auto' = transparent bg + #808080 sentinel ink; FE swaps to currentColor
+    #          so one SVG adapts to both dark and light page backgrounds.
+    theme: Literal["light", "dark", "auto"] = "light"
 
 
 class RenderFigureResponse(BaseModel):

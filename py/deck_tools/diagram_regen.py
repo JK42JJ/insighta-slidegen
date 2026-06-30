@@ -50,6 +50,13 @@ FIGURE_DPI = 300
 SUPPORTED_DIAGRAM_TYPES = ("flow", "tree", "layered", "matrix", "swimlane")
 # Same ink self-check floor as chart_regen (blank render → label-only).
 MIN_INK_FRACTION = 0.002
+# Density gate: diagrams with fewer real nodes than this carry almost no
+# structural information and render crudely ("정확하거나 없거나").
+MIN_DIAGRAM_NODES = 3
+# Adaptive-theme sentinel: FE string-replaces this with currentColor so SVG
+# text/lines inherit the page's text color on both dark and light backgrounds.
+# #808080 is also a tolerable mid-grey fallback when a swap ever misses.
+_AUTO_INK = "#808080"
 
 _FONT_INSTALLED = False
 
@@ -152,13 +159,24 @@ def _nodes_edges_consistent(nodes: list, edges: list) -> bool:
 
 def _base(graphviz, name: str, rankdir: str = "TB", font_scale: float = 1.0, theme: str = "light"):
     g = graphviz.Digraph(name, format="png")
-    bg = "transparent" if theme == "dark" else "white"
-    edge_c = _D_EDGE if theme == "dark" else "#334155"
+    if theme == "dark":
+        bg = "transparent"
+        edge_c = _D_EDGE
+        default_node_stroke = INK
+    elif theme == "auto":
+        # Transparent bg; sentinel ink so FE can swap to currentColor.
+        bg = "transparent"
+        edge_c = _AUTO_INK
+        default_node_stroke = _AUTO_INK
+    else:
+        bg = "white"
+        edge_c = "#334155"
+        default_node_stroke = INK
     g.attr(rankdir=rankdir, bgcolor=bg, fontname=FONT, pad="0.3",
            nodesep="0.4", ranksep="0.5", dpi=str(FIGURE_DPI))
     g.attr("node", shape="box", style="rounded,filled", fontname=FONT,
            fontsize=str(round(11 * font_scale, 1)), margin="0.18,0.12",
-           penwidth="1.6", color=INK)
+           penwidth="1.6", color=default_node_stroke)
     g.attr("edge", fontname=FONT, fontsize=str(round(9 * font_scale, 1)),
            color=edge_c, penwidth="1.6")
     return g
@@ -171,8 +189,13 @@ def _render_diagram(graphviz, dtype: str, nodes: list, edges: list, font_scale: 
     # diagram itself belongs in the raster.
     rankdir = "LR" if dtype in ("flow", "swimlane") else "TB"
     g = _base(graphviz, dtype, rankdir=rankdir, font_scale=font_scale, theme=theme)
-    # Dark: uniform dark fill + light text; light: per-category tint (current).
-    node_fc = _D_INK if theme == "dark" else INK
+    # Resolve per-theme ink color for node text.
+    if theme == "dark":
+        node_fc = _D_INK
+    elif theme == "auto":
+        node_fc = _AUTO_INK  # sentinel; FE swaps to currentColor
+    else:
+        node_fc = INK
     # group → cluster (layered/swimlane); ungrouped → flat.
     groups: dict[str, list] = {}
     for i, n in enumerate(nodes):
@@ -180,10 +203,22 @@ def _render_diagram(graphviz, dtype: str, nodes: list, edges: list, font_scale: 
         groups.setdefault(gid, []).append((i, n))
     for ci, (gid, members) in enumerate(groups.items()):
         ec, fc = _color(ci)
-        node_fill = _D_FILL if theme == "dark" else fc
+        # Auto: transparent fill so the page background shows through; accent
+        # border (ec) is kept — accent colors are visible on both themes.
+        if theme == "dark":
+            node_fill = _D_FILL
+        elif theme == "auto":
+            node_fill = "transparent"
+        else:
+            node_fill = fc
         if gid:
-            # Cluster border keeps accent; label text light on dark.
-            cluster_fc = _D_INK if theme == "dark" else ec
+            # Cluster border keeps accent; cluster label text uses theme ink.
+            if theme == "dark":
+                cluster_fc = _D_INK
+            elif theme == "auto":
+                cluster_fc = _AUTO_INK
+            else:
+                cluster_fc = ec
             with g.subgraph(name=f"cluster_{ci}") as c:
                 c.attr(label=gid, style="rounded,dashed", color=ec, fontcolor=cluster_fc,
                        fontname=FONT, fontsize=str(round(12 * font_scale, 1)),
@@ -194,7 +229,12 @@ def _render_diagram(graphviz, dtype: str, nodes: list, edges: list, font_scale: 
         else:
             for i, n in members:
                 ec2, fc2 = _color(i)
-                fill2 = _D_FILL if theme == "dark" else fc2
+                if theme == "dark":
+                    fill2 = _D_FILL
+                elif theme == "auto":
+                    fill2 = "transparent"
+                else:
+                    fill2 = fc2
                 g.node(str(n["id"]), str(n.get("label", n["id"])),
                        color=ec2, fillcolor=fill2, fontcolor=node_fc)
     for e in edges:
@@ -213,6 +253,10 @@ def _render_table(graphviz, struct: dict, theme: str = "light"):
     g = graphviz.Digraph("table", format="png")
     if theme == "dark":
         g.attr(bgcolor="transparent", dpi=str(FIGURE_DPI), fontname=FONT, fontcolor=_D_INK)
+    elif theme == "auto":
+        # Transparent bg; sentinel ink for body cell text; FE swaps to currentColor.
+        # Header cells keep accent BGCOLOR + white FONT — visible on both themes.
+        g.attr(bgcolor="transparent", dpi=str(FIGURE_DPI), fontname=FONT, fontcolor=_AUTO_INK)
     else:
         g.attr(bgcolor="white", dpi=str(FIGURE_DPI), fontname=FONT)
     ec, _ = PALETTE["slate"]
@@ -262,8 +306,10 @@ def regenerate_diagram_svg(struct: dict, font_scale: float = 1.0, theme: str = "
     None). Calls g.pipe(format="svg") — no file written.
 
     Args:
-        theme: 'light' (default, dark ink on white — deck/PNG path) or 'dark'
-               (light ink on transparent — FE note card path).
+        theme: 'light' (default, dark ink on white — deck/PNG path), 'dark'
+               (light ink on transparent — FE note card), or 'auto' (adaptive:
+               transparent bg + #808080 sentinel ink; FE swaps to currentColor
+               so one SVG works on both dark and light page backgrounds).
     """
     if not isinstance(struct, dict) or not _have_dot():
         return None
@@ -281,6 +327,13 @@ def regenerate_diagram_svg(struct: dict, font_scale: float = 1.0, theme: str = "
             return None
         nodes = struct.get("nodes") or []
         if not _nodes_edges_consistent(nodes, struct.get("edges") or []):
+            return None
+        # Density gate: trivially sparse diagrams carry almost no structural
+        # information ("정확하거나 없거나"). Count real nodes (phantom-filtered).
+        real_node_count = sum(
+            1 for n in nodes if isinstance(n, dict) and n.get("id") is not None
+        )
+        if real_node_count < MIN_DIAGRAM_NODES:
             return None
         g = _render_diagram(graphviz, dtype, nodes, struct.get("edges") or [], font_scale, theme=theme)
     if g is None:
