@@ -94,11 +94,20 @@ class _ChartPalette:
 _LIGHT_PAL = _ChartPalette(INK, MUT, FAINT, LINE)
 # Dark palette = light ink on transparent bg (FE note card path).
 _DARK_PAL = _ChartPalette("#E2E8F0", "#94A3B8", "#64748B", "#475569")
+# Auto palette: uniform sentinel hex so the FE can string-replace → currentColor.
+# Series accent colors (SERIES_COLORS) are NOT neutralised — they are visible on
+# both dark and light backgrounds and carry categorical meaning.
+_AUTO_INK_HEX = "#808080"
+_AUTO_PAL = _ChartPalette(_AUTO_INK_HEX, _AUTO_INK_HEX, _AUTO_INK_HEX, _AUTO_INK_HEX)
 
 
 def _pal(theme: str) -> _ChartPalette:
     """Resolve palette for theme; defaults to light so PNG path is unaffected."""
-    return _DARK_PAL if theme == "dark" else _LIGHT_PAL
+    if theme == "dark":
+        return _DARK_PAL
+    if theme == "auto":
+        return _AUTO_PAL
+    return _LIGHT_PAL
 PRIMARY = "#2563EB"
 CAT = {  # (main, tint, deep)
     "blue": ("#2563EB", "#EFF4FF", "#1D4ED8"),
@@ -418,8 +427,10 @@ def regenerate_chart_svg(struct: dict, theme: str = "light") -> str | None:
     flat). Returns SVG string or None; no file written.
 
     Args:
-        theme: 'light' (default, dark ink — deck/PNG parity) or 'dark'
-               (light ink on transparent bg — FE note card path).
+        theme: 'light' (default, dark ink — deck/PNG parity), 'dark'
+               (light ink on transparent bg — FE note card), or 'auto'
+               (transparent bg + #808080 sentinel ink; FE swaps to currentColor
+               so one SVG adapts to both dark and light page backgrounds).
     """
     if not isinstance(struct, dict):
         return None
