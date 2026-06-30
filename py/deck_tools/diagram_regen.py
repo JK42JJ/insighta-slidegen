@@ -32,6 +32,10 @@ from pathlib import Path
 # ── Insighta brand palette (deck/scripts/figures.py parity) ──────────────────
 FONT = "NanumGothic"
 INK = "#0F172A"
+# Dark-theme SVG overrides (FE note card path only; PNG deck path always light).
+_D_INK = "#E2E8F0"   # primary text on dark
+_D_EDGE = "#64748B"  # edges / lines
+_D_FILL = "#1E293B"  # node body fill
 PALETTE = {
     "blue": ("#2563EB", "#EFF4FF"),
     "emerald": ("#059669", "#ECFDF5"),
@@ -146,25 +150,29 @@ def _nodes_edges_consistent(nodes: list, edges: list) -> bool:
     return True
 
 
-def _base(graphviz, name: str, rankdir: str = "TB", font_scale: float = 1.0):
+def _base(graphviz, name: str, rankdir: str = "TB", font_scale: float = 1.0, theme: str = "light"):
     g = graphviz.Digraph(name, format="png")
-    g.attr(rankdir=rankdir, bgcolor="white", fontname=FONT, pad="0.3",
+    bg = "transparent" if theme == "dark" else "white"
+    edge_c = _D_EDGE if theme == "dark" else "#334155"
+    g.attr(rankdir=rankdir, bgcolor=bg, fontname=FONT, pad="0.3",
            nodesep="0.4", ranksep="0.5", dpi=str(FIGURE_DPI))
     g.attr("node", shape="box", style="rounded,filled", fontname=FONT,
            fontsize=str(round(11 * font_scale, 1)), margin="0.18,0.12",
            penwidth="1.6", color=INK)
     g.attr("edge", fontname=FONT, fontsize=str(round(9 * font_scale, 1)),
-           color="#334155", penwidth="1.6")
+           color=edge_c, penwidth="1.6")
     return g
 
 
-def _render_diagram(graphviz, dtype: str, nodes: list, edges: list, font_scale: float = 1.0):
+def _render_diagram(graphviz, dtype: str, nodes: list, edges: list, font_scale: float = 1.0, theme: str = "light"):
     # flow / swimlane lay left→right; tree / layered top→bottom; matrix grid.
     # A2: the insight/title is NOT drawn on the graph — the slide template
     # renders it as editable text (figureSlide title + caption). Only the
     # diagram itself belongs in the raster.
     rankdir = "LR" if dtype in ("flow", "swimlane") else "TB"
-    g = _base(graphviz, dtype, rankdir=rankdir, font_scale=font_scale)
+    g = _base(graphviz, dtype, rankdir=rankdir, font_scale=font_scale, theme=theme)
+    # Dark: uniform dark fill + light text; light: per-category tint (current).
+    node_fc = _D_INK if theme == "dark" else INK
     # group → cluster (layered/swimlane); ungrouped → flat.
     groups: dict[str, list] = {}
     for i, n in enumerate(nodes):
@@ -172,19 +180,23 @@ def _render_diagram(graphviz, dtype: str, nodes: list, edges: list, font_scale: 
         groups.setdefault(gid, []).append((i, n))
     for ci, (gid, members) in enumerate(groups.items()):
         ec, fc = _color(ci)
+        node_fill = _D_FILL if theme == "dark" else fc
         if gid:
+            # Cluster border keeps accent; label text light on dark.
+            cluster_fc = _D_INK if theme == "dark" else ec
             with g.subgraph(name=f"cluster_{ci}") as c:
-                c.attr(label=gid, style="rounded,dashed", color=ec, fontcolor=ec,
+                c.attr(label=gid, style="rounded,dashed", color=ec, fontcolor=cluster_fc,
                        fontname=FONT, fontsize=str(round(12 * font_scale, 1)),
                        margin="12", labelloc="b")
                 for i, n in members:
                     c.node(str(n["id"]), str(n.get("label", n["id"])),
-                           color=ec, fillcolor=fc, fontcolor=INK)
+                           color=ec, fillcolor=node_fill, fontcolor=node_fc)
         else:
             for i, n in members:
                 ec2, fc2 = _color(i)
+                fill2 = _D_FILL if theme == "dark" else fc2
                 g.node(str(n["id"]), str(n.get("label", n["id"])),
-                       color=ec2, fillcolor=fc2, fontcolor=INK)
+                       color=ec2, fillcolor=fill2, fontcolor=node_fc)
     for e in edges:
         kw = {}
         if e.get("style"):
@@ -193,14 +205,18 @@ def _render_diagram(graphviz, dtype: str, nodes: list, edges: list, font_scale: 
     return g
 
 
-def _render_table(graphviz, struct: dict):
+def _render_table(graphviz, struct: dict, theme: str = "light"):
     headers = [str(h) for h in (struct.get("headers") or [])]
     rows = struct.get("rows") or []
     if not headers or not rows:
         return None
     g = graphviz.Digraph("table", format="png")
-    g.attr(bgcolor="white", dpi=str(FIGURE_DPI), fontname=FONT)
+    if theme == "dark":
+        g.attr(bgcolor="transparent", dpi=str(FIGURE_DPI), fontname=FONT, fontcolor=_D_INK)
+    else:
+        g.attr(bgcolor="white", dpi=str(FIGURE_DPI), fontname=FONT)
     ec, _ = PALETTE["slate"]
+    # Header row: accent bg with white text — readable on both themes.
     th = "".join(
         f'<TD BGCOLOR="{ec}"><FONT COLOR="white"><B>{_esc(h)}</B></FONT></TD>' for h in headers
     )
@@ -239,12 +255,15 @@ def _has_enough_ink(out_path: str | os.PathLike) -> bool:
         return True
 
 
-def regenerate_diagram_svg(struct: dict, font_scale: float = 1.0) -> str | None:
+def regenerate_diagram_svg(struct: dict, font_scale: float = 1.0, theme: str = "light") -> str | None:
     """Render a diagram/table struct to an inline SVG string.
 
     Same fail-closed gates as regenerate_diagram (unusable struct / dot absent →
-    None). Calls g.pipe(format="svg") — no file written. The graphviz SVG is
-    self-contained (fonts/styles embedded inline by dot).
+    None). Calls g.pipe(format="svg") — no file written.
+
+    Args:
+        theme: 'light' (default, dark ink on white — deck/PNG path) or 'dark'
+               (light ink on transparent — FE note card path).
     """
     if not isinstance(struct, dict) or not _have_dot():
         return None
@@ -255,7 +274,7 @@ def regenerate_diagram_svg(struct: dict, font_scale: float = 1.0) -> str | None:
         return None
 
     if "headers" in struct and "rows" in struct:
-        g = _render_table(graphviz, struct)
+        g = _render_table(graphviz, struct, theme=theme)
     else:
         dtype = struct.get("diagram_type")
         if dtype not in SUPPORTED_DIAGRAM_TYPES:
@@ -263,7 +282,7 @@ def regenerate_diagram_svg(struct: dict, font_scale: float = 1.0) -> str | None:
         nodes = struct.get("nodes") or []
         if not _nodes_edges_consistent(nodes, struct.get("edges") or []):
             return None
-        g = _render_diagram(graphviz, dtype, nodes, struct.get("edges") or [], font_scale)
+        g = _render_diagram(graphviz, dtype, nodes, struct.get("edges") or [], font_scale, theme=theme)
     if g is None:
         return None
 

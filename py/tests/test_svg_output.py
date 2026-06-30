@@ -1,6 +1,6 @@
 """Validation tests for SVG output — feeds real cached prod structs and
 asserts SVG (or None) is produced.  Covers render_figure_svg dispatcher,
-regenerate_diagram_svg, and regenerate_chart_svg.
+regenerate_diagram_svg, and regenerate_chart_svg (light + dark theme).
 """
 
 import shutil
@@ -36,6 +36,13 @@ TABLE_STRUCT = {
         ["INT8 (8비트)", "75%", "1-2%"],
         ["INT4 (4비트)", "87.5%", "3-10%"],
     ],
+}
+
+CHART_BAR_STRUCT = {
+    "chart_type": "bar",
+    "axes": {"x": "Category", "y": "Count"},
+    "series": [{"name": "Data", "points": [{"x": "A", "y": 10}, {"x": "B", "y": 25}]}],
+    "insight": "A vs B",
 }
 
 CHART_PIE_DEGENERATE = {
@@ -140,3 +147,62 @@ def test_render_figure_svg_unknown_kind_returns_none():
     assert render_figure_svg("equation", {}) is None
     assert render_figure_svg("unknown", {}) is None
     assert render_figure_svg("table", {}) is None
+
+
+# ── Dark-theme SVG tests ──────────────────────────────────────────────────────
+
+
+@dot_required
+def test_diagram_dark_no_white_background():
+    """Dark diagram SVG must not carry a white background polygon.
+
+    Graphviz emits fill="white" for bgcolor="white"; transparent skips it.
+    Also verifies the near-black INK color (#0F172A) is absent — proving the
+    dark text palette was applied, not the light one.
+    """
+    svg_light = render_figure_svg("diagram", FLOW_STRUCT, theme="light")
+    svg_dark = render_figure_svg("diagram", FLOW_STRUCT, theme="dark")
+    assert svg_dark is not None, "dark diagram must produce SVG"
+    assert "<svg" in svg_dark
+
+    svg_dark_lower = svg_dark.lower()
+    # No white-fill background polygon in dark output.
+    assert 'fill="white"' not in svg_dark_lower, \
+        "dark SVG must not contain fill=white background"
+    # Near-black INK (#0F172A) must not appear as a text/fill color.
+    assert "#0f172a" not in svg_dark_lower, \
+        "dark SVG must not use near-black INK color #0F172A"
+
+    # Light output must still have the white background (unchanged behavior).
+    assert svg_light is not None
+    assert 'fill="white"' in svg_light.lower(), \
+        "light SVG must retain fill=white background (deck behavior unchanged)"
+
+
+def test_chart_dark_has_light_ink():
+    """Dark chart SVG must carry the light ink color used for axes/labels.
+
+    _DARK_PAL.line = #475569 is applied to spines; present in SVG stroke attrs.
+    Also confirms the near-black INK color is absent from SVG ink attrs.
+    """
+    svg_dark = render_figure_svg("chart", CHART_BAR_STRUCT, theme="dark")
+    assert svg_dark is not None, "dark bar chart must produce SVG"
+    assert "<svg" in svg_dark
+
+    svg_dark_lower = svg_dark.lower()
+    # Dark spine color must appear (proves _ax received dark palette).
+    assert "#475569" in svg_dark_lower, \
+        "dark SVG must contain dark-palette spine color #475569"
+    # Near-black INK must not appear as axis/label color.
+    assert "#0f172a" not in svg_dark_lower, \
+        "dark SVG must not use near-black INK color #0F172A for labels/axes"
+
+
+def test_chart_light_svg_unchanged():
+    """Light chart SVG (default) must still use the dark-ink palette."""
+    svg_light = render_figure_svg("chart", CHART_BAR_STRUCT, theme="light")
+    assert svg_light is not None
+    svg_lower = svg_light.lower()
+    # Light spine color LINE = #CBD5E1 must appear.
+    assert "#cbd5e1" in svg_lower, \
+        "light SVG must retain light-palette LINE color #CBD5E1 (deck behavior unchanged)"
