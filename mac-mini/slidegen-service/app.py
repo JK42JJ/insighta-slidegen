@@ -35,7 +35,7 @@ import os
 import sys
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
@@ -208,6 +208,9 @@ class RenderFigureRequest(BaseModel):
 
     kind: str
     struct: dict
+    # 'light' (default) = dark ink, matches .pptx deck (existing behavior).
+    # 'dark' = light ink + transparent bg for FE note card (dark card surface).
+    theme: Literal["light", "dark"] = "light"
 
 
 class RenderFigureResponse(BaseModel):
@@ -242,7 +245,7 @@ def render_figure(req: RenderFigureRequest) -> RenderFigureResponse:
     try:
         from deck_tools.svg_output import render_figure_svg  # noqa: PLC0415
 
-        svg = render_figure_svg(req.kind, req.struct)
+        svg = render_figure_svg(req.kind, req.struct, theme=req.theme)
         return RenderFigureResponse(svg=svg)
     except Exception as exc:  # noqa: BLE001 — fail-closed, never 500-crash the note path
         sys.stderr.write(f"render_figure error kind={req.kind!r}: {exc!r}\n")

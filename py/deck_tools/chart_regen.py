@@ -76,6 +76,29 @@ INK = "#0F172A"
 MUT = "#475569"
 FAINT = "#94A3B8"
 LINE = "#CBD5E1"
+
+
+class _ChartPalette:
+    """Per-render color set; PNG renderers always use module-level constants."""
+
+    __slots__ = ("ink", "mut", "faint", "line")
+
+    def __init__(self, ink: str, mut: str, faint: str, line: str) -> None:
+        self.ink = ink
+        self.mut = mut
+        self.faint = faint
+        self.line = line
+
+
+# Light palette = current module constants (deck / PNG path, unchanged).
+_LIGHT_PAL = _ChartPalette(INK, MUT, FAINT, LINE)
+# Dark palette = light ink on transparent bg (FE note card path).
+_DARK_PAL = _ChartPalette("#E2E8F0", "#94A3B8", "#64748B", "#475569")
+
+
+def _pal(theme: str) -> _ChartPalette:
+    """Resolve palette for theme; defaults to light so PNG path is unaffected."""
+    return _DARK_PAL if theme == "dark" else _LIGHT_PAL
 PRIMARY = "#2563EB"
 CAT = {  # (main, tint, deep)
     "blue": ("#2563EB", "#EFF4FF", "#1D4ED8"),
@@ -108,16 +131,22 @@ BROKEN_AXIS_RATIO = 12.0
 MIN_INK_FRACTION = 0.002
 
 
-def _ax(figsize: tuple[float, float] = DEFAULT_FIGSIZE):
-    """Transparent-background axes with brand spines/ticks (figures.py `_ax`)."""
+def _ax(figsize: tuple[float, float] = DEFAULT_FIGSIZE, pal: "_ChartPalette | None" = None):
+    """Transparent-background axes with brand spines/ticks (figures.py `_ax`).
+
+    pal: optional palette override for SVG dark-theme renders; None = light.
+    PNG renderers call _ax() without pal, always getting light colors.
+    """
+    if pal is None:
+        pal = _LIGHT_PAL
     fig, ax = plt.subplots(figsize=figsize, dpi=FIGURE_DPI)
     fig.patch.set_alpha(0)
     ax.set_facecolor("none")
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
-    ax.spines["left"].set_color(LINE)
-    ax.spines["bottom"].set_color(LINE)
-    ax.tick_params(colors=MUT, labelsize=9)
+    ax.spines["left"].set_color(pal.line)
+    ax.spines["bottom"].set_color(pal.line)
+    ax.tick_params(colors=pal.mut, labelsize=9)
     return fig, ax
 
 
@@ -204,13 +233,17 @@ def _value_label(value: float) -> str:
     return f"{value:.4g}"
 
 
-def _draw_bar(ax, series: list[tuple[str, list, list]]) -> None:
+def _draw_bar(ax, series: list[tuple[str, list, list]], pal: "_ChartPalette | None" = None) -> None:
     """Grouped bars; category labels come from each series' x values.
 
     §2c: every bar is annotated with its value (a labelled-only bar is
     'unfinished' per invariant 11). Single-series charts with an extreme
     value spread get a broken-axis panel via _draw_bar_broken instead.
+
+    pal: optional palette; None = light (PNG path default).
     """
+    if pal is None:
+        pal = _LIGHT_PAL
     labels = [str(x) for x in series[0][1]]
     positions = range(len(labels))
     bar_width = BAR_GROUP_WIDTH / len(series)
@@ -219,7 +252,7 @@ def _draw_bar(ax, series: list[tuple[str, list, list]]) -> None:
         heights = ys[: len(labels)]
         bars = ax.bar(offsets, heights, width=bar_width, color=_color(i), zorder=3, label=name)
         ax.bar_label(
-            bars, labels=[_value_label(v) for v in heights], padding=2, fontsize=8, color=MUT
+            bars, labels=[_value_label(v) for v in heights], padding=2, fontsize=8, color=pal.mut
         )
     ax.set_xticks(list(positions))
     ax.set_xticklabels(labels)
@@ -378,11 +411,15 @@ def _has_enough_ink_svg(svg: str) -> bool:
     return bool(svg) and "<svg" in svg and len(svg) > 200
 
 
-def regenerate_chart_svg(struct: dict) -> str | None:
+def regenerate_chart_svg(struct: dict, theme: str = "light") -> str | None:
     """Regenerate a chart as an inline SVG string from a mode-B struct.
 
     Same degenerate gates as regenerate_chart (unknown type / empty series /
     flat). Returns SVG string or None; no file written.
+
+    Args:
+        theme: 'light' (default, dark ink — deck/PNG parity) or 'dark'
+               (light ink on transparent bg — FE note card path).
     """
     if not isinstance(struct, dict):
         return None
@@ -395,13 +432,15 @@ def regenerate_chart_svg(struct: dict) -> str | None:
     if not _chart_has_variance(series, chart_type):
         return None  # CP505: flat (all y equal) → drop; never a low-info chart
 
-    if chart_type == "bar" and _needs_broken_axis(series):
-        return _regenerate_bar_broken_svg(struct, series)
+    pal = _pal(theme)
 
-    fig, ax = _ax()
+    if chart_type == "bar" and _needs_broken_axis(series):
+        return _regenerate_bar_broken_svg(struct, series, theme=theme)
+
+    fig, ax = _ax(pal=pal)
     try:
         if chart_type == "bar":
-            _draw_bar(ax, series)
+            _draw_bar(ax, series, pal=pal)
         elif chart_type == "scatter":
             for i, (name, xs, ys) in enumerate(series):
                 ax.scatter(xs, ys, s=26, color=_color(i), alpha=0.8, zorder=3, label=name)
@@ -411,9 +450,9 @@ def regenerate_chart_svg(struct: dict) -> str | None:
 
         axes = struct.get("axes") or {}
         if axes.get("x"):
-            ax.set_xlabel(str(axes["x"]), fontsize=10, color=INK)
+            ax.set_xlabel(str(axes["x"]), fontsize=10, color=pal.ink)
         if axes.get("y"):
-            ax.set_ylabel(str(axes["y"]), fontsize=10, color=INK)
+            ax.set_ylabel(str(axes["y"]), fontsize=10, color=pal.ink)
         # A2: insight/title is NOT baked into the SVG — rendered as slide text.
         if any(name for name, _xs, _ys in series):
             ax.legend(frameon=False, fontsize=9)
@@ -428,8 +467,9 @@ def regenerate_chart_svg(struct: dict) -> str | None:
     return svg if _has_enough_ink_svg(svg) else None
 
 
-def _regenerate_bar_broken_svg(struct: dict, series: list[tuple[str, list, list]]) -> str | None:
+def _regenerate_bar_broken_svg(struct: dict, series: list[tuple[str, list, list]], theme: str = "light") -> str | None:
     """SVG variant of _regenerate_bar_broken (saves to BytesIO instead of file)."""
+    pal = _pal(theme)
     name, xs, ys = series[0]
     labels = [str(x) for x in xs]
     heights = ys[: len(labels)]
@@ -443,15 +483,15 @@ def _regenerate_bar_broken_svg(struct: dict, series: list[tuple[str, list, list]
         axp.patch.set_alpha(0)
         for spine in ("top", "right"):
             axp.spines[spine].set_visible(False)
-        axp.spines["left"].set_color(LINE)
-        axp.spines["bottom"].set_color(LINE)
-        axp.tick_params(colors=MUT, labelsize=9)
+        axp.spines["left"].set_color(pal.line)
+        axp.spines["bottom"].set_color(pal.line)
+        axp.tick_params(colors=pal.mut, labelsize=9)
     fig.patch.set_alpha(0)
     try:
         for axp in (ax_top, ax_bot):
             bars = axp.bar(positions, heights, width=BAR_GROUP_WIDTH, color=_color(0), zorder=3)
             axp.bar_label(
-                bars, labels=[_value_label(v) for v in heights], padding=2, fontsize=8, color=MUT
+                bars, labels=[_value_label(v) for v in heights], padding=2, fontsize=8, color=pal.mut
             )
         ax_top.set_ylim(0, max(heights) * 1.12)
         ax_bot.set_ylim(0, small_max)
@@ -461,9 +501,9 @@ def _regenerate_bar_broken_svg(struct: dict, series: list[tuple[str, list, list]
         ax_bot.set_xticklabels(labels)
         axes_spec = struct.get("axes") or {}
         if axes_spec.get("y"):
-            ax_bot.set_ylabel(str(axes_spec["y"]), fontsize=10, color=INK)
+            ax_bot.set_ylabel(str(axes_spec["y"]), fontsize=10, color=pal.ink)
         if axes_spec.get("x"):
-            ax_bot.set_xlabel(str(axes_spec["x"]), fontsize=10, color=INK)
+            ax_bot.set_xlabel(str(axes_spec["x"]), fontsize=10, color=pal.ink)
         # A2: insight/title rendered as editable slide text, not baked here.
         plt.tight_layout(pad=0.4)
         buf = io.BytesIO()
